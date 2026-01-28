@@ -44,9 +44,10 @@ public class SignReplacer extends Module {
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
         .name("range")
         .description("The range to scan for signs.")
-        .defaultValue(5)
+        .defaultValue(15)
         .min(1)
-        .sliderMax(10)
+        .max(128)
+        .sliderMax(64)
         .build()
     );
 
@@ -59,14 +60,14 @@ public class SignReplacer extends Module {
         .build()
     );
 
-    private final Setting<Boolean> rotate = sgGeneral.add(new BooleanSetting.Builder()
+    private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
         .name("rotate")
         .description("Rotate towards the sign when interacting.")
         .defaultValue(true)
         .build()
     );
 
-    private final Setting<Boolean> onlyDifferent = sgGeneral.add(new BooleanSetting.Builder()
+    private final Setting<Boolean> onlyDifferent = sgGeneral.add(new BoolSetting.Builder()
         .name("only-different")
         .description("Only replace signs that have different text than your custom text.")
         .defaultValue(true)
@@ -110,7 +111,7 @@ public class SignReplacer extends Module {
     );
 
     // Render Settings
-    private final Setting<Boolean> render = sgRender.add(new BooleanSetting.Builder()
+    private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
         .name("render")
         .description("Render signs in range.")
         .defaultValue(true)
