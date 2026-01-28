@@ -1,0 +1,27 @@
+{
+    "schemaVersion": 1,
+    "id": "sign-replacer-addon",
+    "version": "${version}",
+    "name": "Sign Replacer Addon",
+    "description": "A Meteor Client addon that scans, mines, and replaces signs with custom text.",
+    "authors": ["Order"],
+    "contact": {
+        "homepage": "https://github.com/quiveringmudflap/sign-replacer-addon",
+        "sources": "https://github.com/quiveringmudflap/sign-replacer-addon"
+    },
+    "license": "GPL-3.0",
+    "icon": "assets/sign-replacer-addon/icon.png",
+    "environment": "client",
+    "entrypoints": {
+        "meteor": [
+            "com.signreplacer.addon.SignReplacerAddon"
+        ]
+    },
+    "mixins": [],
+    "depends": {
+        "minecraft": ">=1.21",
+        "fabric-loader": ">=0.15.0",
+        "java": ">=21",
+        "meteor-client": "*"
+    }
+}
