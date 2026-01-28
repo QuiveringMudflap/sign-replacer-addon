@@ -49,3 +49,15 @@ jar {
         rename { "${it}_${project.archives_base_name}" }
     }
 }
+
+// Copy JAR with Minecraft version in filename
+tasks.register('copyWithVersion', Copy) {
+    dependsOn remapJar
+    from("build/libs/${project.archives_base_name}-${project.mod_version}.jar")
+    into("build/libs")
+    rename { "${project.archives_base_name}-${project.mod_version}-mc${project.minecraft_version}.jar" }
+}
+
+tasks.named('build') {
+    finalizedBy copyWithVersion
+}
