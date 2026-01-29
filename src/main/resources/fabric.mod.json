@@ -17,7 +17,7 @@
             "com.signreplacer.addon.SignReplacerAddon"
         ]
     },
-    "mixins": [],
+    "mixins": ["mudflap-mod.mixins.json"],
     "depends": {
         "minecraft": ">=1.21",
         "fabricloader": ">=0.15.0",
