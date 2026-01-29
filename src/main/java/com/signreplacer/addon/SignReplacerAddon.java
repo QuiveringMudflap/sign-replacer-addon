@@ -1,6 +1,7 @@
 package com.signreplacer.addon;
 
 import com.signreplacer.addon.modules.SignReplacer;
+import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -27,5 +28,15 @@ public class SignReplacerAddon extends MeteorAddon {
     @Override
     public String getPackage() {
         return "com.signreplacer.addon";
+    }
+
+    @Override
+    public String getWebsite() {
+        return "https://github.com/QuiveringMudflap/sign-replacer-addon";
+    }
+
+    @Override
+    public GithubRepo getRepo() {
+        return new GithubRepo("QuiveringMudflap", "sign-replacer-addon");
     }
 }

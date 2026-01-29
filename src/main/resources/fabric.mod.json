@@ -2,12 +2,12 @@
     "schemaVersion": 1,
     "id": "sign-replacer-addon",
     "version": "${version}",
-    "name": "Sign Replacer Addon",
-    "description": "A Meteor Client addon that scans, mines, and replaces signs with custom text.",
-    "authors": ["Order"],
+    "name": "Mudflap Mod",
+    "description": "A Meteor Client addon by QuiveringMudflap. Sign replacer and more utilities for 2b2t.",
+    "authors": ["QuiveringMudflap"],
     "contact": {
-        "homepage": "https://github.com/quiveringmudflap/sign-replacer-addon",
-        "sources": "https://github.com/quiveringmudflap/sign-replacer-addon"
+        "homepage": "https://github.com/QuiveringMudflap/sign-replacer-addon",
+        "sources": "https://github.com/QuiveringMudflap/sign-replacer-addon"
     },
     "license": "GPL-3.0",
     "icon": "assets/sign-replacer-addon/icon.png",
