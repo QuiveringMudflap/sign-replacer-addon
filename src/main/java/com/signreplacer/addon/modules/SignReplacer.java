@@ -8,26 +8,20 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
-import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.SignBlock;
 import net.minecraft.block.WallSignBlock;
-import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.SignBlockEntity;
-import net.minecraft.block.entity.SignText;
 import net.minecraft.client.gui.screen.ingame.SignEditScreen;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSignC2SPacket;
-import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
@@ -44,10 +38,10 @@ public class SignReplacer extends Module {
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
         .name("range")
         .description("The range to scan for signs.")
-        .defaultValue(15)
+        .defaultValue(5)
         .min(1)
-        .max(128)
-        .sliderMax(64)
+        .max(6)
+        .sliderMax(6)
         .build()
     );
 
@@ -74,10 +68,10 @@ public class SignReplacer extends Module {
         .build()
     );
 
-    private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
-        .name("mode")
-        .description("How to replace signs.")
-        .defaultValue(Mode.BreakAndPlace)
+    private final Setting<Boolean> autoWalk = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-walk")
+        .description("Automatically walk towards signs that are out of reach.")
+        .defaultValue(true)
         .build()
     );
 
@@ -85,28 +79,28 @@ public class SignReplacer extends Module {
     private final Setting<String> line1 = sgText.add(new StringSetting.Builder()
         .name("line-1")
         .description("Text for line 1 of the sign.")
-        .defaultValue("")
+        .defaultValue("VOID SUPPLY SHOP")
         .build()
     );
 
     private final Setting<String> line2 = sgText.add(new StringSetting.Builder()
         .name("line-2")
         .description("Text for line 2 of the sign.")
-        .defaultValue("")
+        .defaultValue("KITS & GEAR")
         .build()
     );
 
     private final Setting<String> line3 = sgText.add(new StringSetting.Builder()
         .name("line-3")
         .description("Text for line 3 of the sign.")
-        .defaultValue("")
+        .defaultValue("LIGHTNING FAST")
         .build()
     );
 
     private final Setting<String> line4 = sgText.add(new StringSetting.Builder()
         .name("line-4")
         .description("Text for line 4 of the sign.")
-        .defaultValue("")
+        .defaultValue("-> .gg/shop2b2t")
         .build()
     );
 
@@ -153,14 +147,12 @@ public class SignReplacer extends Module {
     private State state = State.Scanning;
     private BlockPos placePos = null;
     private Direction placeDirection = null;
-
-    public enum Mode {
-        BreakAndPlace,
-        EditOnly
-    }
+    private float miningProgress = 0;
+    private BlockPos miningBlock = null;
 
     private enum State {
         Scanning,
+        Walking,
         Breaking,
         WaitingForBreak,
         Placing,
@@ -169,7 +161,7 @@ public class SignReplacer extends Module {
     }
 
     public SignReplacer() {
-        super(SignReplacerAddon.CATEGORY, "sign-replacer", "Scans for signs, breaks them, and replaces with custom text.");
+        super(SignReplacerAddon.CATEGORY, "sign-replacer", "Automatically breaks and replaces signs with custom text.");
     }
 
     @Override
@@ -180,12 +172,16 @@ public class SignReplacer extends Module {
         state = State.Scanning;
         placePos = null;
         placeDirection = null;
+        miningProgress = 0;
+        miningBlock = null;
     }
 
     @Override
     public void onDeactivate() {
         signs.clear();
         currentTarget = null;
+        miningBlock = null;
+        miningProgress = 0;
     }
 
     @EventHandler
@@ -196,6 +192,7 @@ public class SignReplacer extends Module {
 
         switch (state) {
             case Scanning -> scanForSigns();
+            case Walking -> walkToSign();
             case Breaking -> breakSign();
             case WaitingForBreak -> waitForBreak();
             case Placing -> placeSign();
@@ -237,12 +234,51 @@ public class SignReplacer extends Module {
             placePos = currentTarget;
             placeDirection = getSignDirection(mc.world.getBlockState(currentTarget));
 
-            if (mode.get() == Mode.BreakAndPlace) {
-                state = State.Breaking;
+            double distance = mc.player.getPos().distanceTo(Vec3d.ofCenter(currentTarget));
+            
+            if (distance > 4.5 && autoWalk.get()) {
+                state = State.Walking;
             } else {
-                state = State.Editing;
+                state = State.Breaking;
             }
             tickTimer = 0;
+        }
+    }
+
+    private void walkToSign() {
+        if (currentTarget == null) {
+            state = State.Scanning;
+            return;
+        }
+
+        Vec3d targetVec = Vec3d.ofCenter(currentTarget);
+        double distance = mc.player.getPos().distanceTo(targetVec);
+
+        // If close enough, start breaking
+        if (distance <= 4.0) {
+            state = State.Breaking;
+            tickTimer = 0;
+            return;
+        }
+
+        // Calculate direction to walk
+        Vec3d playerPos = mc.player.getPos();
+        Vec3d direction = targetVec.subtract(playerPos).normalize();
+
+        // Face the direction we're walking
+        float yaw = (float) Math.toDegrees(Math.atan2(-direction.x, direction.z));
+        mc.player.setYaw(yaw);
+        mc.player.setPitch(0);
+
+        // Move player towards sign
+        double speed = 0.2;
+        mc.player.setVelocity(direction.x * speed, mc.player.getVelocity().y, direction.z * speed);
+
+        // Timeout - if we can't reach after 10 seconds, skip this sign
+        if (tickTimer > 200) {
+            signs.remove(currentTarget);
+            currentTarget = null;
+            state = State.Scanning;
         }
     }
 
@@ -251,9 +287,8 @@ public class SignReplacer extends Module {
     }
 
     private boolean hasMatchingText(BlockPos pos) {
-        BlockEntity be = mc.world.getBlockEntity(pos);
-        if (be instanceof SignBlockEntity signEntity) {
-            SignText frontText = signEntity.getFrontText();
+        if (mc.world.getBlockEntity(pos) instanceof SignBlockEntity signEntity) {
+            var frontText = signEntity.getFrontText();
             String[] customLines = {line1.get(), line2.get(), line3.get(), line4.get()};
 
             for (int i = 0; i < 4; i++) {
@@ -282,19 +317,51 @@ public class SignReplacer extends Module {
 
         if (tickTimer < delay.get()) return;
 
-        if (!isSign(mc.world.getBlockState(currentTarget))) {
+        BlockState blockState = mc.world.getBlockState(currentTarget);
+        if (!isSign(blockState)) {
             state = State.Placing;
             tickTimer = 0;
+            miningProgress = 0;
+            miningBlock = null;
             return;
         }
 
+        // Look at the sign
         if (rotate.get()) {
             Rotations.rotate(Rotations.getYaw(currentTarget), Rotations.getPitch(currentTarget));
         }
 
-        BlockUtils.breakBlock(currentTarget, true);
-        state = State.WaitingForBreak;
-        tickTimer = 0;
+        // Start or continue mining
+        if (miningBlock == null || !miningBlock.equals(currentTarget)) {
+            // Start mining
+            miningBlock = currentTarget;
+            miningProgress = 0;
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                PlayerActionC2SPacket.Action.START_DESTROY_BLOCK,
+                currentTarget,
+                Direction.UP
+            ));
+        }
+
+        // Continue mining - simulate holding down
+        mc.interactionManager.updateBlockBreakingProgress(currentTarget, Direction.UP);
+        miningProgress += blockState.calcBlockBreakingDelta(mc.player, mc.world, currentTarget);
+
+        // Swing arm for visual feedback
+        mc.player.swingHand(Hand.MAIN_HAND);
+
+        // Check if block should be broken
+        if (miningProgress >= 1.0f) {
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK,
+                currentTarget,
+                Direction.UP
+            ));
+            state = State.WaitingForBreak;
+            tickTimer = 0;
+            miningProgress = 0;
+            miningBlock = null;
+        }
     }
 
     private void waitForBreak() {

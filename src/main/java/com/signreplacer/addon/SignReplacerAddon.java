@@ -9,11 +9,11 @@ import org.slf4j.LoggerFactory;
 
 public class SignReplacerAddon extends MeteorAddon {
     public static final Logger LOG = LoggerFactory.getLogger(SignReplacerAddon.class);
-    public static final Category CATEGORY = new Category("Sign Replacer");
+    public static final Category CATEGORY = new Category("Mudflap Mod");
 
     @Override
     public void onInitialize() {
-        LOG.info("Initializing Sign Replacer Addon");
+        LOG.info("Initializing Mudflap Mod");
 
         // Register modules
         Modules.get().add(new SignReplacer());
