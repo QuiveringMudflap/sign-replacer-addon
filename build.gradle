@@ -58,6 +58,27 @@ tasks.register('copyWithVersion', Copy) {
     rename { "${project.archives_base_name}-${project.mod_version}-mc${project.minecraft_version}.jar" }
 }
 
+// Prism Launcher mods folder – override with -PmodsDir=/path/to/mods if needed
+def modsDir = project.hasProperty('modsDir')
+    ? project.modsDir
+    : "${System.getProperty('user.home')}/Library/Application Support/PrismLauncher/instances/1.21.4(1)/minecraft/mods"
+
+tasks.register('deployToMods', Copy) {
+    dependsOn copyWithVersion
+    from("build/libs/${project.archives_base_name}-${project.mod_version}-mc${project.minecraft_version}.jar")
+    into(modsDir)
+    doLast { logger.lifecycle("Deployed JAR to ${modsDir}") }
+}
+
 tasks.named('build') {
     finalizedBy copyWithVersion
+    finalizedBy deployToMods
+}
+
+// Optional: push to git after building. Run with: ./gradlew build pushRepo
+tasks.register('pushRepo', Exec) {
+    dependsOn build
+    onlyIf { project.file('.git').exists() }
+    commandLine 'sh', '-c', "git add -A && git commit -m 'Build ${project.mod_version} mc${project.minecraft_version}' --allow-empty && git push"
+    ignoreExitValue true
 }
