@@ -1,0 +1,10 @@
+# Oxygen Mod (sign-replacer-addon) – workflow
+
+**After every change** to this addon (any Java, resources, or config under `sign-replacer-addon/`):
+
+1. Run **`./gradlew build`** from `sign-replacer-addon/`.  
+   This compiles the mod and **automatically copies the JAR into the Prism Launcher mods folder** (deployToMods runs after every build). Always do this—do not skip.
+
+2. Optionally run **`./gradlew build pushRepo`** if you also want to commit and push to git.
+
+**Remember:** Every time you build this mod, run `./gradlew build` so the JAR is copied into the jar/mods folder. It’s part of the build.

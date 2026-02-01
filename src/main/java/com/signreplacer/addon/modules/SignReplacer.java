@@ -16,14 +16,22 @@ import net.minecraft.block.SignBlock;
 import net.minecraft.block.WallSignBlock;
 import net.minecraft.block.entity.SignBlockEntity;
 import net.minecraft.client.gui.screen.ingame.SignEditScreen;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityType;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSignC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -37,18 +45,48 @@ public class SignReplacer extends Module {
     // General Settings
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
         .name("range")
-        .description("The range to scan for signs.")
-        .defaultValue(5)
+        .description("The range to scan for signs (blocks in all directions).")
+        .defaultValue(100)
         .min(1)
-        .max(6)
-        .sliderMax(6)
+        .max(100)
+        .sliderMax(100)
+        .build()
+    );
+
+    private final Setting<Integer> giveUpTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("give-up-ticks")
+        .description("If the current sign can't be mined or reached in this many ticks, skip it and move to the next. 20 ticks = 1 second. Prevents getting stuck on one sign forever.")
+        .defaultValue(3000)
+        .min(200)
+        .max(12000)
+        .sliderMax(6000)
+        .build()
+    );
+
+    private final Setting<Double> pickupRange = sgGeneral.add(new DoubleSetting.Builder()
+        .name("pickup-range")
+        .description("Walk to dropped sign within this many blocks before placing new sign.")
+        .defaultValue(2.0)
+        .min(1.0)
+        .max(10.0)
+        .decimalPlaces(1)
+        .build()
+    );
+
+    private final Setting<Double> maxDropDistance = sgGeneral.add(new DoubleSetting.Builder()
+        .name("max-drop-distance")
+        .description("Give up chasing the dropped sign if it's farther than this (e.g. fell off cliff). Don't walk all the way down for one sign.")
+        .defaultValue(15.0)
+        .min(5.0)
+        .max(50.0)
+        .decimalPlaces(1)
         .build()
     );
 
     private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
         .name("delay")
-        .description("Delay in ticks between actions.")
-        .defaultValue(5)
+        .description("Delay in ticks between actions. Lower = faster (aim for ~1 sign every 2 sec with 1–2).")
+        .defaultValue(1)
         .min(0)
         .sliderMax(20)
         .build()
@@ -75,25 +113,68 @@ public class SignReplacer extends Module {
         .build()
     );
 
+    private final Setting<Boolean> placeOnly = sgGeneral.add(new BoolSetting.Builder()
+        .name("place-only")
+        .description("Don't mine existing signs; only place new signs (look down and right-click periodically).")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Double> placePitch = sgGeneral.add(new DoubleSetting.Builder()
+        .name("place-pitch")
+        .description("Pitch (degrees) to look when placing in place-only mode. 90 = straight down.")
+        .defaultValue(70.0)
+        .min(30.0)
+        .max(90.0)
+        .decimalPlaces(1)
+        .build()
+    );
+
+    private final Setting<Boolean> jumpWhenNeeded = sgGeneral.add(new BoolSetting.Builder()
+        .name("jump-when-needed")
+        .description("Jump when placing a sign one block above feet so you can reach it.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> placementCooldown = sgGeneral.add(new IntSetting.Builder()
+        .name("placement-cooldown")
+        .description("Ticks to wait after placing a sign before finding the next spot. Reduces lag spikes.")
+        .defaultValue(10)
+        .min(0)
+        .max(40)
+        .sliderMax(20)
+        .build()
+    );
+
+    private final Setting<Integer> scanInterval = sgGeneral.add(new IntSetting.Builder()
+        .name("scan-interval")
+        .description("In place-only mode, only run scan every N ticks. Higher = less CPU, slightly slower placement.")
+        .defaultValue(2)
+        .min(1)
+        .max(10)
+        .build()
+    );
+
     // Sign Text Settings
     private final Setting<String> line1 = sgText.add(new StringSetting.Builder()
         .name("line-1")
         .description("Text for line 1 of the sign.")
-        .defaultValue("VOID SUPPLY SHOP")
+        .defaultValue("#1 FASTEST")
         .build()
     );
 
     private final Setting<String> line2 = sgText.add(new StringSetting.Builder()
         .name("line-2")
         .description("Text for line 2 of the sign.")
-        .defaultValue("KITS & GEAR")
+        .defaultValue("DELIVERY ON 2B2T")
         .build()
     );
 
     private final Setting<String> line3 = sgText.add(new StringSetting.Builder()
         .name("line-3")
         .description("Text for line 3 of the sign.")
-        .defaultValue("LIGHTNING FAST")
+        .defaultValue("KITS & GEAR")
         .build()
     );
 
@@ -144,17 +225,34 @@ public class SignReplacer extends Module {
     private final List<BlockPos> signs = new ArrayList<>();
     private BlockPos currentTarget = null;
     private int tickTimer = 0;
+    private int ticksAtTarget = 0;
+    private int collectingTicks = 0;
     private State state = State.Scanning;
     private BlockPos placePos = null;
     private Direction placeDirection = null;
     private float miningProgress = 0;
     private BlockPos miningBlock = null;
+    // Chunked scan for large range: max blocks per tick to avoid lag
+    private static final int MAX_BLOCKS_PER_TICK = 2048;
+    private int scanCurrentY = Integer.MIN_VALUE;
+    private int scanCurrentX;
+    private int scanCurrentZ;
+    private int scanMinY;
+    private int scanMaxY;
+    private int scanMinX;
+    private int scanMaxX;
+    private int scanMinZ;
+    private int scanMaxZ;
+    private int placementCooldownTicks = 0;
+    private int jumpReleaseTicks = 0;
+    private static final int MAX_RENDER_BOXES = 64;
 
     private enum State {
         Scanning,
         Walking,
         Breaking,
         WaitingForBreak,
+        CollectingItem,
         Placing,
         WaitingForPlace,
         Editing
@@ -169,11 +267,16 @@ public class SignReplacer extends Module {
         signs.clear();
         currentTarget = null;
         tickTimer = 0;
+        ticksAtTarget = 0;
         state = State.Scanning;
         placePos = null;
         placeDirection = null;
         miningProgress = 0;
         miningBlock = null;
+        collectingTicks = 0;
+        scanCurrentY = Integer.MIN_VALUE;
+        placementCooldownTicks = 0;
+        jumpReleaseTicks = 0;
     }
 
     @Override
@@ -188,6 +291,13 @@ public class SignReplacer extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
+        if (jumpReleaseTicks > 0) {
+            jumpReleaseTicks--;
+            if (jumpReleaseTicks == 0) {
+                mc.options.jumpKey.setPressed(false);
+            }
+        }
+
         tickTimer++;
 
         switch (state) {
@@ -195,6 +305,7 @@ public class SignReplacer extends Module {
             case Walking -> walkToSign();
             case Breaking -> breakSign();
             case WaitingForBreak -> waitForBreak();
+            case CollectingItem -> walkToDrop();
             case Placing -> placeSign();
             case WaitingForPlace -> waitForPlace();
             case Editing -> editSign();
@@ -202,21 +313,81 @@ public class SignReplacer extends Module {
     }
 
     private void scanForSigns() {
-        signs.clear();
+        if (placeOnly.get()) {
+            if (placementCooldownTicks > 0) {
+                placementCooldownTicks--;
+                return;
+            }
+            if (tickTimer % scanInterval.get() != 0) return;
+            scanForPlaceOnly();
+            return;
+        }
+        int r = range.get();
+        if (r > 32) {
+            scanForSignsLayered();
+            return;
+        }
+        scanForSignsFull(r);
+    }
+
+    /** Chunked scan when range > 32: at most MAX_BLOCKS_PER_TICK per tick so no lag spike. */
+    private void scanForSignsLayered() {
         BlockPos playerPos = mc.player.getBlockPos();
         int r = range.get();
+        if (scanCurrentY == Integer.MIN_VALUE) {
+            int worldMinY = -64;
+            int worldMaxY = 319;
+            scanMinY = Math.max(worldMinY, playerPos.getY() - r);
+            scanMaxY = Math.min(worldMaxY, playerPos.getY() + r);
+            scanMinX = playerPos.getX() - r;
+            scanMaxX = playerPos.getX() + r;
+            scanMinZ = playerPos.getZ() - r;
+            scanMaxZ = playerPos.getZ() + r;
+            scanCurrentY = scanMinY;
+            scanCurrentX = scanMinX;
+            scanCurrentZ = scanMinZ;
+            signs.clear();
+        }
+        int done = 0;
+        while (scanCurrentY <= scanMaxY && done < MAX_BLOCKS_PER_TICK) {
+            while (scanCurrentX <= scanMaxX && done < MAX_BLOCKS_PER_TICK) {
+                while (scanCurrentZ <= scanMaxZ && done < MAX_BLOCKS_PER_TICK) {
+                    BlockPos pos = new BlockPos(scanCurrentX, scanCurrentY, scanCurrentZ);
+                    BlockState blockState = mc.world.getBlockState(pos);
+                    if (isSign(blockState)) {
+                        if (onlyDifferent.get()) {
+                            if (!hasMatchingText(pos)) signs.add(pos);
+                        } else {
+                            signs.add(pos);
+                        }
+                    }
+                    done++;
+                    scanCurrentZ++;
+                }
+                scanCurrentZ = scanMinZ;
+                scanCurrentX++;
+            }
+            scanCurrentX = scanMinX;
+            scanCurrentY++;
+        }
+        if (scanCurrentY > scanMaxY) {
+            scanCurrentY = Integer.MIN_VALUE;
+            finishScanAndPickTarget();
+        }
+    }
 
+    /** Original full 3D scan when range <= 32. Revert: in scanForSigns() call this with r and keep original loop here only. */
+    private void scanForSignsFull(int r) {
+        signs.clear();
+        BlockPos playerPos = mc.player.getBlockPos();
         for (int x = -r; x <= r; x++) {
             for (int y = -r; y <= r; y++) {
                 for (int z = -r; z <= r; z++) {
                     BlockPos pos = playerPos.add(x, y, z);
                     BlockState blockState = mc.world.getBlockState(pos);
-
                     if (isSign(blockState)) {
                         if (onlyDifferent.get()) {
-                            if (!hasMatchingText(pos)) {
-                                signs.add(pos);
-                            }
+                            if (!hasMatchingText(pos)) signs.add(pos);
                         } else {
                             signs.add(pos);
                         }
@@ -224,62 +395,103 @@ public class SignReplacer extends Module {
                 }
             }
         }
+        finishScanAndPickTarget();
+    }
 
-        // Sort by distance
+    private void finishScanAndPickTarget() {
         signs.sort(Comparator.comparingDouble(pos ->
             mc.player.getPos().squaredDistanceTo(Vec3d.ofCenter(pos))));
+        if (signs.isEmpty()) return;
+        currentTarget = signs.get(0);
+        placePos = currentTarget;
+        placeDirection = getSignDirection(mc.world.getBlockState(currentTarget));
+        double distance = mc.player.getPos().distanceTo(Vec3d.ofCenter(currentTarget));
+        if (distance > 4.5 && autoWalk.get()) {
+            state = State.Walking;
+        } else {
+            state = State.Breaking;
+        }
+        tickTimer = 0;
+    }
 
-        if (!signs.isEmpty()) {
-            currentTarget = signs.get(0);
-            placePos = currentTarget;
-            placeDirection = getSignDirection(mc.world.getBlockState(currentTarget));
+    private void scanForPlaceOnly() {
+        // Look down so we hit the ground in front
+        float pitchDeg = (float) (double) placePitch.get();
+        mc.player.setPitch(pitchDeg);
+        Vec3d start = mc.player.getEyePos();
+        Vec3d look = mc.player.getRotationVec(1.0f);
+        Vec3d end = start.add(look.multiply(5.0));
+        RaycastContext ctx = new RaycastContext(start, end, RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mc.player);
+        HitResult hit = mc.world.raycast(ctx);
+        if (hit == null || hit.getType() != HitResult.Type.BLOCK) {
+            // No block hit (sky/void) – turn a bit and try again next tick
+            mc.player.setYaw(mc.player.getYaw() + 15f);
+            return;
+        }
+        BlockHitResult blockHit = (BlockHitResult) hit;
+        BlockPos supportPos = blockHit.getBlockPos();
+        Direction face = blockHit.getSide();
+        BlockPos signPos = supportPos.offset(face);
+        if (!mc.world.getBlockState(signPos).isAir()) {
+            mc.player.setYaw(mc.player.getYaw() + 15f);
+            return;
+        }
+        placePos = signPos;
+        currentTarget = null;
+        Vec3d targetVec = Vec3d.ofCenter(placePos);
+        double distance = mc.player.getPos().distanceTo(targetVec);
+        if (distance > 4.5 && autoWalk.get()) {
+            state = State.Walking;
+            ticksAtTarget = 0;
+        } else {
+            state = State.Placing;
+        }
+        tickTimer = 0;
+    }
 
-            double distance = mc.player.getPos().distanceTo(Vec3d.ofCenter(currentTarget));
-            
-            if (distance > 4.5 && autoWalk.get()) {
-                state = State.Walking;
+    private void walkToSign() {
+        // Place-only: walk towards placePos when there is no currentTarget
+        BlockPos walkTarget = currentTarget != null ? currentTarget : placePos;
+        if (walkTarget == null) {
+            state = State.Scanning;
+            return;
+        }
+
+        ticksAtTarget++;
+        if (ticksAtTarget > giveUpTicks.get() && currentTarget != null) {
+            signs.remove(currentTarget);
+            currentTarget = null;
+            state = State.Scanning;
+            ticksAtTarget = 0;
+            return;
+        }
+        if (ticksAtTarget > giveUpTicks.get() && placeOnly.get()) {
+            placePos = null;
+            state = State.Scanning;
+            ticksAtTarget = 0;
+            return;
+        }
+
+        Vec3d targetVec = Vec3d.ofCenter(walkTarget);
+        double distance = mc.player.getPos().distanceTo(targetVec);
+
+        if (distance <= 4.0) {
+            if (placeOnly.get()) {
+                state = State.Placing;
             } else {
                 state = State.Breaking;
             }
             tickTimer = 0;
-        }
-    }
-
-    private void walkToSign() {
-        if (currentTarget == null) {
-            state = State.Scanning;
             return;
         }
 
-        Vec3d targetVec = Vec3d.ofCenter(currentTarget);
-        double distance = mc.player.getPos().distanceTo(targetVec);
-
-        // If close enough, start breaking
-        if (distance <= 4.0) {
-            state = State.Breaking;
-            tickTimer = 0;
-            return;
-        }
-
-        // Calculate direction to walk
         Vec3d playerPos = mc.player.getPos();
         Vec3d direction = targetVec.subtract(playerPos).normalize();
-
-        // Face the direction we're walking
         float yaw = (float) Math.toDegrees(Math.atan2(-direction.x, direction.z));
         mc.player.setYaw(yaw);
-        mc.player.setPitch(0);
-
-        // Move player towards sign
+        mc.player.setPitch(placeOnly.get() ? (float) (double) placePitch.get() : 0);
         double speed = 0.2;
         mc.player.setVelocity(direction.x * speed, mc.player.getVelocity().y, direction.z * speed);
-
-        // Timeout - if we can't reach after 10 seconds, skip this sign
-        if (tickTimer > 200) {
-            signs.remove(currentTarget);
-            currentTarget = null;
-            state = State.Scanning;
-        }
     }
 
     private boolean isSign(BlockState state) {
@@ -314,15 +526,17 @@ public class SignReplacer extends Module {
             state = State.Scanning;
             return;
         }
+        mc.options.jumpKey.setPressed(false);
 
         if (tickTimer < delay.get()) return;
 
         BlockState blockState = mc.world.getBlockState(currentTarget);
         if (!isSign(blockState)) {
-            state = State.Placing;
             tickTimer = 0;
             miningProgress = 0;
             miningBlock = null;
+            collectingTicks = 0;
+            state = State.CollectingItem;
             return;
         }
 
@@ -370,17 +584,89 @@ public class SignReplacer extends Module {
             return;
         }
 
-        // Check if block is broken
         if (!isSign(mc.world.getBlockState(currentTarget))) {
-            state = State.Placing;
             tickTimer = 0;
+            collectingTicks = 0;
+            state = State.CollectingItem;
             return;
         }
 
-        // Timeout - try breaking again
-        if (tickTimer > 40) {
+        if (tickTimer > 15) {
+            state = State.CollectingItem;
+            tickTimer = 0;
+            return;
+        }
+        if (tickTimer > 5) {
             state = State.Breaking;
             tickTimer = 0;
+        }
+    }
+
+    private void walkToDrop() {
+        if (placePos == null) {
+            state = State.Placing;
+            return;
+        }
+
+        collectingTicks++;
+        // Walk to where the sign DROPPED (the item entity), NOT where the sign was broken (e.g. if it fell off cliff)
+        ItemEntity dropEntity = findDroppedSignEntity(placePos);
+        if (dropEntity == null || !dropEntity.isAlive()) {
+            if (collectingTicks > 40) {
+                if (currentTarget != null) signs.remove(currentTarget);
+                currentTarget = null;
+                placePos = null;
+                state = State.Scanning;
+                collectingTicks = 0;
+                mc.options.jumpKey.setPressed(false);
+            }
+            return;
+        }
+        Vec3d dropVec = dropEntity.getPos();
+        double distance = mc.player.getPos().distanceTo(dropVec);
+        double maxDist = maxDropDistance.get();
+        if (distance > maxDist) {
+            if (currentTarget != null) signs.remove(currentTarget);
+            currentTarget = null;
+            placePos = null;
+            state = State.Scanning;
+            collectingTicks = 0;
+            mc.options.jumpKey.setPressed(false);
+            return;
+        }
+
+        // Only go to Placing when we're in range AND we have the sign (picked up)
+        boolean inRange = distance <= pickupRange.get();
+        boolean haveSign = findSign().found();
+        if (inRange && haveSign) {
+            state = State.Placing;
+            tickTimer = 0;
+            collectingTicks = 0;
+            return;
+        }
+        if (collectingTicks > 200) {
+            state = State.Placing;
+            tickTimer = 0;
+            collectingTicks = 0;
+            return;
+        }
+
+        if (inRange) {
+            return;
+        }
+
+        Vec3d playerPos = mc.player.getPos();
+        Vec3d direction = dropVec.subtract(playerPos).normalize();
+        float yaw = (float) Math.toDegrees(Math.atan2(-direction.x, direction.z));
+        mc.player.setYaw(yaw);
+        mc.player.setPitch(0);
+        double speed = 0.2;
+        mc.player.setVelocity(direction.x * speed, mc.player.getVelocity().y, direction.z * speed);
+        // Only jump when drop is meaningfully above (e.g. 0.6 blocks), not from item bounce on flat ground
+        if (jumpWhenNeeded.get() && dropVec.y > mc.player.getY() + 0.6) {
+            mc.options.jumpKey.setPressed(true);
+        } else {
+            mc.options.jumpKey.setPressed(false);
         }
     }
 
@@ -431,6 +717,12 @@ public class SignReplacer extends Module {
             Rotations.rotate(Rotations.getYaw(placePos), Rotations.getPitch(placePos));
         }
 
+        // Jump when placement is one block (or more) above feet so we can reach
+        if (jumpWhenNeeded.get() && placePos.getY() > mc.player.getBlockY()) {
+            mc.options.jumpKey.setPressed(true);
+            jumpReleaseTicks = 8;
+        }
+
         // Place the sign
         Vec3d hitPos = Vec3d.ofCenter(supportPos).add(
             placeSide.getOffsetX() * 0.5,
@@ -450,6 +742,21 @@ public class SignReplacer extends Module {
         tickTimer = 0;
     }
 
+    private static boolean isSignItem(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        return stack.getItem() == Items.OAK_SIGN ||
+            stack.getItem() == Items.SPRUCE_SIGN ||
+            stack.getItem() == Items.BIRCH_SIGN ||
+            stack.getItem() == Items.JUNGLE_SIGN ||
+            stack.getItem() == Items.ACACIA_SIGN ||
+            stack.getItem() == Items.DARK_OAK_SIGN ||
+            stack.getItem() == Items.MANGROVE_SIGN ||
+            stack.getItem() == Items.CHERRY_SIGN ||
+            stack.getItem() == Items.BAMBOO_SIGN ||
+            stack.getItem() == Items.CRIMSON_SIGN ||
+            stack.getItem() == Items.WARPED_SIGN;
+    }
+
     private FindItemResult findSign() {
         return InvUtils.find(itemStack ->
             itemStack.getItem() == Items.OAK_SIGN ||
@@ -464,6 +771,25 @@ public class SignReplacer extends Module {
             itemStack.getItem() == Items.CRIMSON_SIGN ||
             itemStack.getItem() == Items.WARPED_SIGN
         );
+    }
+
+    /** Find the dropped sign ItemEntity nearest to the block we broke (walk to THIS, not where the sign was broken). */
+    private ItemEntity findDroppedSignEntity(BlockPos nearPos) {
+        if (mc.world == null || mc.player == null) return null;
+        Vec3d center = Vec3d.ofCenter(nearPos);
+        Box box = new Box(nearPos).expand(12);
+        ItemEntity best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (Entity e : mc.world.getEntitiesByType(EntityType.ITEM, box, entity -> true)) {
+            if (!(e instanceof ItemEntity itemEntity)) continue;
+            if (!isSignItem(itemEntity.getStack())) continue;
+            double d = e.getPos().squaredDistanceTo(center);
+            if (d < bestDist) {
+                bestDist = d;
+                best = itemEntity;
+            }
+        }
+        return best;
     }
 
     private BlockPos findSupportBlock(BlockPos signPos) {
@@ -514,14 +840,17 @@ public class SignReplacer extends Module {
         }
 
         // Timeout
-        if (tickTimer > 40) {
+        if (tickTimer > 20) {
+            if (placePos != null) signs.remove(placePos);
+            if (currentTarget != null) signs.remove(currentTarget);
             state = State.Scanning;
             currentTarget = null;
+            placePos = null;
         }
     }
 
     private void editSign() {
-        if (tickTimer < 2) return;
+        if (tickTimer < 1) return;
 
         // If sign edit screen is open, send the text
         if (mc.currentScreen instanceof SignEditScreen) {
@@ -542,7 +871,8 @@ public class SignReplacer extends Module {
             }
         }
 
-        // Move to next sign
+        // Move to next sign; cooldown before next scan to reduce lag spike
+        placementCooldownTicks = placementCooldown.get();
         state = State.Scanning;
         currentTarget = null;
         placePos = null;
@@ -553,14 +883,15 @@ public class SignReplacer extends Module {
     private void onRender(Render3DEvent event) {
         if (!render.get()) return;
 
-        // Render all signs in range
+        // Cap boxes drawn to avoid FPS drops with huge sign lists
+        int drawn = 0;
         for (BlockPos pos : signs) {
+            if (drawn >= MAX_RENDER_BOXES) break;
             if (pos.equals(currentTarget)) continue;
-
             event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+            drawn++;
         }
 
-        // Render current target
         if (currentTarget != null) {
             event.renderer.box(currentTarget, targetColor.get(), targetColor.get(), ShapeMode.Both, 0);
         }

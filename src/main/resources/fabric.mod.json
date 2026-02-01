@@ -2,7 +2,7 @@
     "schemaVersion": 1,
     "id": "sign-replacer-addon",
     "version": "${version}",
-    "name": "Mudflap Mod",
+    "name": "Oxygen Mod",
     "description": "A Meteor Client addon by QuiveringMudflap. Sign replacer and more utilities for 2b2t.",
     "authors": ["QuiveringMudflap"],
     "contact": {
@@ -23,5 +23,8 @@
         "fabricloader": ">=0.15.0",
         "java": ">=21",
         "meteor-client": "*"
+    },
+    "custom": {
+        "meteor-client:color": "255,170,0"
     }
 }
