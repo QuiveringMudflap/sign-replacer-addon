@@ -354,7 +354,7 @@ public class SignReplacer extends Module {
             case PathingToPlace -> tickPathingToPlace();
             case Breaking -> breakSign();
             case WaitingForBreak -> waitForBreak();
-            case CollectingItem -> walkToDrop();
+            case CollectingItem -> tickCollectingItemBaritoneOnly();
             case Placing -> placeSign();
             case WaitingForPlace -> waitForPlace();
         }
@@ -716,7 +716,18 @@ public class SignReplacer extends Module {
             miningProgress = 0;
             miningBlock = null;
             collectingTicks = 0;
-            state = State.CollectingItem;
+            if (BaritoneHelper.isAvailable() && placePos != null) {
+                BaritoneHelper.pathTo(placePos);
+                state = State.PathingToDrop;
+            } else {
+                if (!BaritoneHelper.isAvailable()) {
+                    info("Baritone required to pick up drops. Skipping sign.");
+                }
+                if (currentTarget != null) signs.remove(currentTarget);
+                currentTarget = null;
+                placePos = null;
+                state = State.Scanning;
+            }
             return;
         }
 
@@ -767,21 +778,33 @@ public class SignReplacer extends Module {
         if (!isSign(mc.world.getBlockState(currentTarget))) {
             tickTimer = 0;
             collectingTicks = 0;
-            if (useBaritone.get() && BaritoneHelper.isAvailable() && placePos != null) {
+            if (BaritoneHelper.isAvailable() && placePos != null) {
                 BaritoneHelper.pathTo(placePos);
                 state = State.PathingToDrop;
             } else {
-                state = State.CollectingItem;
+                if (!BaritoneHelper.isAvailable()) {
+                    info("Baritone required to pick up drops – add Baritone mod. Skipping sign.");
+                }
+                if (currentTarget != null) signs.remove(currentTarget);
+                currentTarget = null;
+                placePos = null;
+                state = State.Scanning;
             }
             return;
         }
 
         if (tickTimer > 15) {
-            if (useBaritone.get() && BaritoneHelper.isAvailable() && placePos != null) {
+            if (BaritoneHelper.isAvailable() && placePos != null) {
                 BaritoneHelper.pathTo(placePos);
                 state = State.PathingToDrop;
             } else {
-                state = State.CollectingItem;
+                if (!BaritoneHelper.isAvailable()) {
+                    info("Baritone required to pick up drops. Skipping sign.");
+                }
+                if (currentTarget != null) signs.remove(currentTarget);
+                currentTarget = null;
+                placePos = null;
+                state = State.Scanning;
             }
             tickTimer = 0;
             return;
@@ -789,6 +812,22 @@ public class SignReplacer extends Module {
         if (tickTimer > 5) {
             state = State.Breaking;
             tickTimer = 0;
+        }
+    }
+
+    /** Only used if we ever land in CollectingItem: use Baritone for pickup, never velocity. */
+    private void tickCollectingItemBaritoneOnly() {
+        if (BaritoneHelper.isAvailable() && placePos != null) {
+            BaritoneHelper.pathTo(placePos);
+            state = State.PathingToDrop;
+            collectingTicks = 0;
+        } else {
+            if (!BaritoneHelper.isAvailable()) info("Baritone required for pickup. Skipping sign.");
+            if (currentTarget != null) signs.remove(currentTarget);
+            currentTarget = null;
+            placePos = null;
+            state = State.Scanning;
+            collectingTicks = 0;
         }
     }
 
