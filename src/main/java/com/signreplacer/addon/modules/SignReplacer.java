@@ -862,41 +862,35 @@ public class SignReplacer extends Module {
             return;
         }
 
-        // Find a valid place position
+        // Find support block (wall sign = block behind; standing = block below)
         BlockPos supportPos = findSupportBlock(placePos);
         if (supportPos == null) {
-            info("No valid support block found for sign placement!");
+            info("No valid support block for sign!");
             state = State.Scanning;
             currentTarget = null;
             return;
         }
 
         Direction placeSide = getPlaceSide(supportPos, placePos);
-        if (placeSide == null) {
-            state = State.Scanning;
-            currentTarget = null;
-            return;
-        }
 
         if (rotate.get()) {
             Rotations.rotate(Rotations.getYaw(placePos), Rotations.getPitch(placePos));
         }
 
-        // Jump when placement is one block (or more) above feet so we can reach
         if (jumpWhenNeeded.get() && placePos.getY() > mc.player.getBlockY()) {
             mc.options.jumpKey.setPressed(true);
             jumpReleaseTicks = 8;
         }
 
-        // Place the sign
-        Vec3d hitPos = Vec3d.ofCenter(supportPos).add(
+        // Hit the center of the face we're placing on (slightly out from support so we're in the air block)
+        Vec3d faceCenter = Vec3d.ofCenter(supportPos).add(
             placeSide.getOffsetX() * 0.5,
             placeSide.getOffsetY() * 0.5,
             placeSide.getOffsetZ() * 0.5
         );
+        BlockHitResult hitResult = new BlockHitResult(faceCenter, placeSide, supportPos, false);
 
-        BlockHitResult hitResult = new BlockHitResult(hitPos, placeSide, supportPos, false);
-
+        mc.player.swingHand(Hand.MAIN_HAND);
         mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
 
         if (signItem.isHotbar() && !signItem.isOffhand()) {
@@ -958,13 +952,21 @@ public class SignReplacer extends Module {
     }
 
     private BlockPos findSupportBlock(BlockPos signPos) {
-        // Check below for standing sign
+        // Wall sign: support is the block the sign was attached to (we stored placeDirection when we broke it)
+        if (placeDirection != null && placeDirection.getAxis().isHorizontal()) {
+            BlockPos wallSupport = signPos.offset(placeDirection.getOpposite());
+            BlockState s = mc.world.getBlockState(wallSupport);
+            if (!s.isAir() && s.isSolidBlock(mc.world, wallSupport)) {
+                return wallSupport;
+            }
+        }
+
+        // Standing sign or fallback: block below
         BlockPos below = signPos.down();
         if (mc.world.getBlockState(below).isSolidBlock(mc.world, below)) {
             return below;
         }
 
-        // Check sides for wall sign
         for (Direction dir : Direction.Type.HORIZONTAL) {
             BlockPos side = signPos.offset(dir);
             if (mc.world.getBlockState(side).isSolidBlock(mc.world, side)) {
@@ -972,7 +974,7 @@ public class SignReplacer extends Module {
             }
         }
 
-        return below; // Default to below
+        return null;
     }
 
     private Direction getPlaceSide(BlockPos supportPos, BlockPos targetPos) {
