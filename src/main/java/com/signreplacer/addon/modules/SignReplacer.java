@@ -1,6 +1,7 @@
 package com.signreplacer.addon.modules;
 
 import com.signreplacer.addon.SignReplacerAddon;
+import com.signreplacer.addon.baritone.BaritoneHelper;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -35,7 +36,9 @@ import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class SignReplacer extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -109,6 +112,13 @@ public class SignReplacer extends Module {
     private final Setting<Boolean> autoWalk = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-walk")
         .description("Automatically walk towards signs that are out of reach.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> useBaritone = sgGeneral.add(new BoolSetting.Builder()
+        .name("use-baritone")
+        .description("Use Baritone for pathfinding (install Baritone mod). Handles jumping, climbing, and looks like normal movement on 2b2t.")
         .defaultValue(true)
         .build()
     );
@@ -232,8 +242,8 @@ public class SignReplacer extends Module {
     private Direction placeDirection = null;
     private float miningProgress = 0;
     private BlockPos miningBlock = null;
-    // Chunked scan for large range: max blocks per tick to avoid lag
-    private static final int MAX_BLOCKS_PER_TICK = 2048;
+    // Chunked scan for large range: max blocks per tick (higher = faster scan, small stutter)
+    private static final int MAX_BLOCKS_PER_TICK = 8192;
     private int scanCurrentY = Integer.MIN_VALUE;
     private int scanCurrentX;
     private int scanCurrentZ;
@@ -246,10 +256,16 @@ public class SignReplacer extends Module {
     private int placementCooldownTicks = 0;
     private int jumpReleaseTicks = 0;
     private static final int MAX_RENDER_BOXES = 64;
+    /** Skip these positions when scanning for 20 sec so we don't re-mine signs we just placed. */
+    private final Map<String, Long> recentlyPlaced = new HashMap<>();
+    private static final long RECENTLY_PLACED_MS = 20_000;
 
     private enum State {
         Scanning,
         Walking,
+        PathingToSign,
+        PathingToDrop,
+        PathingToPlace,
         Breaking,
         WaitingForBreak,
         CollectingItem,
@@ -281,17 +297,35 @@ public class SignReplacer extends Module {
 
     @Override
     public void onDeactivate() {
+        BaritoneHelper.cancelPath();
         signs.clear();
         currentTarget = null;
         miningBlock = null;
         miningProgress = 0;
+        if (mc.options != null) {
+            mc.options.forwardKey.setPressed(false);
+            mc.options.jumpKey.setPressed(false);
+        }
+    }
+
+    private static String posKey(BlockPos p) {
+        return p.getX() + "," + p.getY() + "," + p.getZ();
+    }
+
+    private boolean isRecentlyPlaced(BlockPos pos) {
+        long now = System.currentTimeMillis();
+        recentlyPlaced.entrySet().removeIf(e -> now - e.getValue() > RECENTLY_PLACED_MS);
+        return recentlyPlaced.containsKey(posKey(pos));
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
-        if (jumpReleaseTicks > 0) {
+        if (state == State.Breaking) {
+            jumpReleaseTicks = 0;
+            mc.options.jumpKey.setPressed(false);
+        } else if (jumpReleaseTicks > 0) {
             jumpReleaseTicks--;
             if (jumpReleaseTicks == 0) {
                 mc.options.jumpKey.setPressed(false);
@@ -303,6 +337,9 @@ public class SignReplacer extends Module {
         switch (state) {
             case Scanning -> scanForSigns();
             case Walking -> walkToSign();
+            case PathingToSign -> tickPathingToSign();
+            case PathingToDrop -> tickPathingToDrop();
+            case PathingToPlace -> tickPathingToPlace();
             case Breaking -> breakSign();
             case WaitingForBreak -> waitForBreak();
             case CollectingItem -> walkToDrop();
@@ -353,12 +390,14 @@ public class SignReplacer extends Module {
             while (scanCurrentX <= scanMaxX && done < MAX_BLOCKS_PER_TICK) {
                 while (scanCurrentZ <= scanMaxZ && done < MAX_BLOCKS_PER_TICK) {
                     BlockPos pos = new BlockPos(scanCurrentX, scanCurrentY, scanCurrentZ);
-                    BlockState blockState = mc.world.getBlockState(pos);
-                    if (isSign(blockState)) {
-                        if (onlyDifferent.get()) {
-                            if (!hasMatchingText(pos)) signs.add(pos);
-                        } else {
-                            signs.add(pos);
+                    if (!isRecentlyPlaced(pos)) {
+                        BlockState blockState = mc.world.getBlockState(pos);
+                        if (isSign(blockState)) {
+                            if (onlyDifferent.get()) {
+                                if (!hasMatchingText(pos)) signs.add(pos);
+                            } else {
+                                signs.add(pos);
+                            }
                         }
                     }
                     done++;
@@ -376,7 +415,7 @@ public class SignReplacer extends Module {
         }
     }
 
-    /** Original full 3D scan when range <= 32. Revert: in scanForSigns() call this with r and keep original loop here only. */
+    /** Original full 3D scan when range <= 32. */
     private void scanForSignsFull(int r) {
         signs.clear();
         BlockPos playerPos = mc.player.getBlockPos();
@@ -384,6 +423,7 @@ public class SignReplacer extends Module {
             for (int y = -r; y <= r; y++) {
                 for (int z = -r; z <= r; z++) {
                     BlockPos pos = playerPos.add(x, y, z);
+                    if (isRecentlyPlaced(pos)) continue;
                     BlockState blockState = mc.world.getBlockState(pos);
                     if (isSign(blockState)) {
                         if (onlyDifferent.get()) {
@@ -407,11 +447,42 @@ public class SignReplacer extends Module {
         placeDirection = getSignDirection(mc.world.getBlockState(currentTarget));
         double distance = mc.player.getPos().distanceTo(Vec3d.ofCenter(currentTarget));
         if (distance > 4.5 && autoWalk.get()) {
-            state = State.Walking;
+            if (useBaritone.get() && BaritoneHelper.isAvailable()) {
+                BaritoneHelper.pathTo(currentTarget);
+                state = State.PathingToSign;
+                ticksAtTarget = 0;
+            } else {
+                state = State.Walking;
+            }
         } else {
             state = State.Breaking;
+            jumpReleaseTicks = 0;
+            mc.options.jumpKey.setPressed(false);
         }
         tickTimer = 0;
+    }
+
+    private void tickPathingToSign() {
+        if (currentTarget == null) {
+            state = State.Scanning;
+            return;
+        }
+        ticksAtTarget++;
+        if (ticksAtTarget > giveUpTicks.get()) {
+            BaritoneHelper.cancelPath();
+            signs.remove(currentTarget);
+            currentTarget = null;
+            state = State.Scanning;
+            ticksAtTarget = 0;
+            return;
+        }
+        if (BaritoneHelper.isAdjacentTo(currentTarget, mc.player.getBlockPos())) {
+            BaritoneHelper.cancelPath();
+            state = State.Breaking;
+            jumpReleaseTicks = 0;
+            mc.options.jumpKey.setPressed(false);
+            tickTimer = 0;
+        }
     }
 
     private void scanForPlaceOnly() {
@@ -441,16 +512,95 @@ public class SignReplacer extends Module {
         Vec3d targetVec = Vec3d.ofCenter(placePos);
         double distance = mc.player.getPos().distanceTo(targetVec);
         if (distance > 4.5 && autoWalk.get()) {
-            state = State.Walking;
-            ticksAtTarget = 0;
+            if (useBaritone.get() && BaritoneHelper.isAvailable()) {
+                BaritoneHelper.pathTo(placePos);
+                state = State.PathingToPlace;
+                ticksAtTarget = 0;
+            } else {
+                state = State.Walking;
+                ticksAtTarget = 0;
+            }
         } else {
             state = State.Placing;
         }
         tickTimer = 0;
     }
 
+    private void tickPathingToPlace() {
+        if (placePos == null) {
+            state = State.Scanning;
+            return;
+        }
+        ticksAtTarget++;
+        if (ticksAtTarget > giveUpTicks.get()) {
+            BaritoneHelper.cancelPath();
+            placePos = null;
+            state = State.Scanning;
+            ticksAtTarget = 0;
+            return;
+        }
+        if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
+            BaritoneHelper.cancelPath();
+            state = State.Placing;
+            tickTimer = 0;
+        }
+    }
+
+    private void tickPathingToDrop() {
+        if (placePos == null) {
+            state = State.Scanning;
+            return;
+        }
+        collectingTicks++;
+        ItemEntity dropEntity = findDroppedSignEntity(placePos);
+        if (dropEntity == null || !dropEntity.isAlive()) {
+            if (collectingTicks > 40) {
+                BaritoneHelper.cancelPath();
+                if (currentTarget != null) signs.remove(currentTarget);
+                currentTarget = null;
+                placePos = null;
+                state = State.Scanning;
+                collectingTicks = 0;
+            }
+            return;
+        }
+        Vec3d dropVec = dropEntity.getPos();
+        double distance = mc.player.getPos().distanceTo(dropVec);
+        if (distance > maxDropDistance.get()) {
+            BaritoneHelper.cancelPath();
+            if (currentTarget != null) signs.remove(currentTarget);
+            currentTarget = null;
+            placePos = null;
+            state = State.Scanning;
+            collectingTicks = 0;
+            return;
+        }
+        if (collectingTicks % 15 == 0) {
+            BaritoneHelper.pathTo(dropVec);
+        }
+        boolean inRange = distance <= pickupRange.get();
+        boolean haveSign = findSign().found();
+        if (inRange && haveSign) {
+            BaritoneHelper.cancelPath();
+            collectingTicks = 0;
+            if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
+                state = State.Placing;
+                tickTimer = 0;
+            } else {
+                BaritoneHelper.pathTo(placePos);
+                state = State.PathingToPlace;
+                ticksAtTarget = 0;
+            }
+        }
+        if (collectingTicks > 200) {
+            BaritoneHelper.cancelPath();
+            state = State.Placing;
+            tickTimer = 0;
+            collectingTicks = 0;
+        }
+    }
+
     private void walkToSign() {
-        // Place-only: walk towards placePos when there is no currentTarget
         BlockPos walkTarget = currentTarget != null ? currentTarget : placePos;
         if (walkTarget == null) {
             state = State.Scanning;
@@ -480,6 +630,8 @@ public class SignReplacer extends Module {
                 state = State.Placing;
             } else {
                 state = State.Breaking;
+                jumpReleaseTicks = 0;
+                mc.options.jumpKey.setPressed(false);
             }
             tickTimer = 0;
             return;
@@ -500,16 +652,19 @@ public class SignReplacer extends Module {
 
     private boolean hasMatchingText(BlockPos pos) {
         if (mc.world.getBlockEntity(pos) instanceof SignBlockEntity signEntity) {
-            var frontText = signEntity.getFrontText();
-            String[] customLines = {line1.get(), line2.get(), line3.get(), line4.get()};
-
-            for (int i = 0; i < 4; i++) {
-                String signLine = frontText.getMessage(i, false).getString();
-                if (!signLine.equals(customLines[i])) {
-                    return false;
+            try {
+                var frontText = signEntity.getFrontText();
+                String[] customLines = {line1.get(), line2.get(), line3.get(), line4.get()};
+                for (int i = 0; i < 4 && i < customLines.length; i++) {
+                    String signLine = frontText.getMessage(i, false).getString();
+                    if (!signLine.equals(customLines[i])) {
+                        return false;
+                    }
                 }
+                return true;
+            } catch (IndexOutOfBoundsException e) {
+                return false;
             }
-            return true;
         }
         return false;
     }
@@ -587,12 +742,22 @@ public class SignReplacer extends Module {
         if (!isSign(mc.world.getBlockState(currentTarget))) {
             tickTimer = 0;
             collectingTicks = 0;
-            state = State.CollectingItem;
+            if (useBaritone.get() && BaritoneHelper.isAvailable() && placePos != null) {
+                BaritoneHelper.pathTo(placePos);
+                state = State.PathingToDrop;
+            } else {
+                state = State.CollectingItem;
+            }
             return;
         }
 
         if (tickTimer > 15) {
-            state = State.CollectingItem;
+            if (useBaritone.get() && BaritoneHelper.isAvailable() && placePos != null) {
+                BaritoneHelper.pathTo(placePos);
+                state = State.PathingToDrop;
+            } else {
+                state = State.CollectingItem;
+            }
             tickTimer = 0;
             return;
         }
@@ -651,9 +816,7 @@ public class SignReplacer extends Module {
             return;
         }
 
-        if (inRange) {
-            return;
-        }
+        if (inRange) return;
 
         Vec3d playerPos = mc.player.getPos();
         Vec3d direction = dropVec.subtract(playerPos).normalize();
@@ -662,7 +825,6 @@ public class SignReplacer extends Module {
         mc.player.setPitch(0);
         double speed = 0.2;
         mc.player.setVelocity(direction.x * speed, mc.player.getVelocity().y, direction.z * speed);
-        // Only jump when drop is meaningfully above (e.g. 0.6 blocks), not from item bounce on flat ground
         if (jumpWhenNeeded.get() && dropVec.y > mc.player.getY() + 0.6) {
             mc.options.jumpKey.setPressed(true);
         } else {
@@ -841,6 +1003,8 @@ public class SignReplacer extends Module {
 
         // Timeout
         if (tickTimer > 20) {
+            BlockPos justPlaced = placePos != null ? placePos : currentTarget;
+            if (justPlaced != null) recentlyPlaced.put(posKey(justPlaced), System.currentTimeMillis());
             if (placePos != null) signs.remove(placePos);
             if (currentTarget != null) signs.remove(currentTarget);
             state = State.Scanning;
@@ -871,7 +1035,9 @@ public class SignReplacer extends Module {
             }
         }
 
-        // Move to next sign; cooldown before next scan to reduce lag spike
+        // Move to next sign; mark this position so we don't re-mine it for 20 sec
+        BlockPos justPlaced = placePos != null ? placePos : currentTarget;
+        if (justPlaced != null) recentlyPlaced.put(posKey(justPlaced), System.currentTimeMillis());
         placementCooldownTicks = placementCooldown.get();
         state = State.Scanning;
         currentTarget = null;

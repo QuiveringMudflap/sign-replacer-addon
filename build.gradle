@@ -75,10 +75,10 @@ tasks.named('build') {
     finalizedBy deployToMods
 }
 
-// Optional: push to git after building. Run with: ./gradlew build pushRepo
+// Optional: push to git after building. Uses anonymous author so your real name isn't on the repo.
 tasks.register('pushRepo', Exec) {
     dependsOn build
     onlyIf { project.file('.git').exists() }
-    commandLine 'sh', '-c', "git add -A && git commit -m 'Build ${project.mod_version} mc${project.minecraft_version}' --allow-empty && git push"
+    commandLine 'sh', '-c', "export GIT_AUTHOR_NAME=QuiveringMudflap && export GIT_AUTHOR_EMAIL=quiveringmudflap@users.noreply.github.com && export GIT_COMMITTER_NAME=QuiveringMudflap && export GIT_COMMITTER_EMAIL=quiveringmudflap@users.noreply.github.com && git add -A && git commit -m 'Build ${project.mod_version} mc${project.minecraft_version}' --allow-empty && git push"
     ignoreExitValue true
 }
