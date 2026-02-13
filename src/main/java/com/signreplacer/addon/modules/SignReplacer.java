@@ -259,6 +259,9 @@ public class SignReplacer extends Module {
     private int ticksWithSign = 0;
     /** Retries of "go back to drop" when we reach Placing without a sign (2b2t lag). */
     private int placeRetryCount = 0;
+    /** Send sign text this many times (2b2t often drops the packet). */
+    private int signTextSendsLeft = 0;
+    private BlockPos signTextTargetPos = null;
     private static final int TICKS_REQUIRED_WITH_SIGN = 10;
     private static final int MAX_PLACE_RETRIES = 3;
     private static final int MAX_RENDER_BOXES = 64;
@@ -300,6 +303,8 @@ public class SignReplacer extends Module {
         jumpReleaseTicks = 0;
         ticksWithSign = 0;
         placeRetryCount = 0;
+        signTextSendsLeft = 0;
+        signTextTargetPos = null;
     }
 
     @Override
@@ -566,16 +571,10 @@ public class SignReplacer extends Module {
                 BaritoneHelper.cancelPath();
                 collectingTicks = 0;
                 ticksWithSign = TICKS_REQUIRED_WITH_SIGN;
-                if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
-                    state = State.Placing;
-                    tickTimer = 0;
-                    placeRetryCount = 0;
-                } else {
-                    BaritoneHelper.pathTo(placePos);
-                    state = State.PathingToPlace;
-                    ticksAtTarget = 0;
-                    placeRetryCount = 0;
-                }
+                state = State.Placing;
+                placePos = null;
+                tickTimer = 0;
+                placeRetryCount = 0;
             } else if (collectingTicks > 80) {
                 BaritoneHelper.cancelPath();
                 if (currentTarget != null) signs.remove(currentTarget);
@@ -612,27 +611,16 @@ public class SignReplacer extends Module {
             BaritoneHelper.cancelPath();
             collectingTicks = 0;
             placeRetryCount = 0;
-            if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
-                state = State.Placing;
-                tickTimer = 0;
-            } else {
-                BaritoneHelper.pathTo(placePos);
-                state = State.PathingToPlace;
-                ticksAtTarget = 0;
-            }
+            state = State.Placing;
+            placePos = null;
+            tickTimer = 0;
         }
         if (collectingTicks > 400 && haveSign) {
             BaritoneHelper.cancelPath();
-            if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
-                state = State.Placing;
-                tickTimer = 0;
-                placeRetryCount = 0;
-            } else {
-                BaritoneHelper.pathTo(placePos);
-                state = State.PathingToPlace;
-                ticksAtTarget = 0;
-                placeRetryCount = 0;
-            }
+            state = State.Placing;
+            placePos = null;
+            tickTimer = 0;
+            placeRetryCount = 0;
             collectingTicks = 0;
         }
     }
@@ -873,18 +861,13 @@ public class SignReplacer extends Module {
     private static final int PLACE_WAIT_TICKS = 3;
 
     private void placeSign() {
-        if (placePos == null) {
-            state = State.Scanning;
-            return;
-        }
-
         if (tickTimer < delay.get() + PLACE_WAIT_TICKS) return;
 
         FindItemResult signItem = findSign();
         if (!signItem.found()) {
             if (tickTimer > 80) {
                 placeRetryCount++;
-                if (placeRetryCount < MAX_PLACE_RETRIES && placePos != null) {
+                if (placeRetryCount < MAX_PLACE_RETRIES) {
                     ticksWithSign = 0;
                     collectingTicks = 0;
                     state = State.PathingToDrop;
@@ -898,7 +881,6 @@ public class SignReplacer extends Module {
             return;
         }
 
-        // Swap to sign
         if (signItem.isOffhand()) {
             // Already good
         } else if (signItem.isHotbar()) {
@@ -908,27 +890,38 @@ public class SignReplacer extends Module {
             return;
         }
 
-        // Find support block (wall sign = block behind; standing = block below)
-        BlockPos supportPos = findSupportBlock(placePos);
-        if (supportPos == null) {
-            info("No valid support block for sign!");
-            state = State.Scanning;
-            currentTarget = null;
-            return;
+        BlockPos supportPos;
+        BlockPos signPos;
+        Direction placeSide;
+        if (placePos != null) {
+            supportPos = findSupportBlock(placePos);
+            if (supportPos == null) {
+                placePos = null;
+                return;
+            }
+            signPos = placePos;
+            placeSide = getPlaceSide(supportPos, placePos);
+        } else {
+            PlaceSpot spot = findPlaceSpotNearPlayer();
+            if (spot == null) {
+                mc.player.setYaw(mc.player.getYaw() + 25f);
+                return;
+            }
+            supportPos = spot.supportPos;
+            signPos = spot.signPos;
+            placeSide = spot.side;
+            placePos = signPos;
         }
-
-        Direction placeSide = getPlaceSide(supportPos, placePos);
 
         if (rotate.get()) {
-            Rotations.rotate(Rotations.getYaw(placePos), Rotations.getPitch(placePos));
+            Rotations.rotate(Rotations.getYaw(signPos), Rotations.getPitch(signPos));
         }
 
-        if (jumpWhenNeeded.get() && placePos.getY() > mc.player.getBlockY()) {
+        if (jumpWhenNeeded.get() && signPos.getY() > mc.player.getBlockY()) {
             mc.options.jumpKey.setPressed(true);
             jumpReleaseTicks = 8;
         }
 
-        // Hit the center of the face we're placing on (slightly out from support so we're in the air block)
         Vec3d faceCenter = Vec3d.ofCenter(supportPos).add(
             placeSide.getOffsetX() * 0.5,
             placeSide.getOffsetY() * 0.5,
@@ -945,6 +938,33 @@ public class SignReplacer extends Module {
 
         state = State.WaitingForPlace;
         tickTimer = 0;
+    }
+
+    private static class PlaceSpot {
+        final BlockPos supportPos, signPos;
+        final Direction side;
+        PlaceSpot(BlockPos supportPos, BlockPos signPos, Direction side) {
+            this.supportPos = supportPos;
+            this.signPos = signPos;
+            this.side = side;
+        }
+    }
+
+    /** Find a block face we can place a sign on (anywhere in front of player). */
+    private PlaceSpot findPlaceSpotNearPlayer() {
+        Vec3d start = mc.player.getEyePos();
+        Vec3d look = mc.player.getRotationVec(1.0f);
+        Vec3d end = start.add(look.multiply(5.0));
+        RaycastContext ctx = new RaycastContext(start, end, RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mc.player);
+        HitResult hit = mc.world.raycast(ctx);
+        if (hit == null || hit.getType() != HitResult.Type.BLOCK) return null;
+        BlockHitResult blockHit = (BlockHitResult) hit;
+        BlockPos supportPos = blockHit.getBlockPos();
+        Direction face = blockHit.getSide();
+        BlockPos signPos = supportPos.offset(face);
+        if (!mc.world.getBlockState(signPos).isAir()) return null;
+        if (!mc.world.getBlockState(supportPos).isSolidBlock(mc.world, supportPos)) return null;
+        return new PlaceSpot(supportPos, signPos, face);
     }
 
     private static boolean isSignItem(ItemStack stack) {
@@ -1040,19 +1060,23 @@ public class SignReplacer extends Module {
     private void waitForPlace() {
         BlockPos posToUpdate = placePos != null ? placePos : currentTarget;
 
-        // Sign block appeared: send text packet immediately (2b2t often doesn't open sign screen)
         if (posToUpdate != null && isSign(mc.world.getBlockState(posToUpdate))) {
-            if (tickTimer >= 1) {
-                sendSignTextPacket(posToUpdate);
-                if (mc.currentScreen instanceof SignEditScreen) {
-                    mc.currentScreen.close();
-                }
-                finishAfterPlace(posToUpdate);
+            if (signTextSendsLeft <= 0) {
+                signTextSendsLeft = 6;
+                signTextTargetPos = posToUpdate;
+            }
+        }
+
+        if (signTextTargetPos != null && signTextSendsLeft > 0) {
+            sendSignTextPacket(signTextTargetPos);
+            signTextSendsLeft--;
+            if (mc.currentScreen instanceof SignEditScreen) mc.currentScreen.close();
+            if (signTextSendsLeft == 0) {
+                finishAfterPlace(signTextTargetPos);
                 return;
             }
         }
 
-        // If sign edit screen opened, send text and finish
         if (mc.currentScreen instanceof SignEditScreen && posToUpdate != null) {
             sendSignTextPacket(posToUpdate);
             mc.currentScreen.close();
@@ -1067,6 +1091,8 @@ public class SignReplacer extends Module {
             state = State.Scanning;
             currentTarget = null;
             placePos = null;
+            signTextSendsLeft = 0;
+            signTextTargetPos = null;
         }
     }
 
@@ -1090,6 +1116,8 @@ public class SignReplacer extends Module {
         placementCooldownTicks = placementCooldown.get();
         placeRetryCount = 0;
         ticksWithSign = 0;
+        signTextSendsLeft = 0;
+        signTextTargetPos = null;
         state = State.Scanning;
         currentTarget = null;
         placePos = null;
