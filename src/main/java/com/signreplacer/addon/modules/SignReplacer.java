@@ -270,8 +270,7 @@ public class SignReplacer extends Module {
         WaitingForBreak,
         CollectingItem,
         Placing,
-        WaitingForPlace,
-        Editing
+        WaitingForPlace
     }
 
     public SignReplacer() {
@@ -345,7 +344,6 @@ public class SignReplacer extends Module {
             case CollectingItem -> walkToDrop();
             case Placing -> placeSign();
             case WaitingForPlace -> waitForPlace();
-            case Editing -> editSign();
         }
     }
 
@@ -832,20 +830,25 @@ public class SignReplacer extends Module {
         }
     }
 
+    /** Wait a few ticks after reaching place pos so inventory is synced (2b2t lag). */
+    private static final int PLACE_WAIT_TICKS = 3;
+
     private void placeSign() {
         if (placePos == null) {
             state = State.Scanning;
             return;
         }
 
-        if (tickTimer < delay.get()) return;
+        if (tickTimer < delay.get() + PLACE_WAIT_TICKS) return;
 
         // Find sign in inventory
         FindItemResult signItem = findSign();
         if (!signItem.found()) {
-            info("No signs found in inventory!");
-            state = State.Scanning;
-            currentTarget = null;
+            if (tickTimer > 60) {
+                info("No signs in inventory – waiting for pickup.");
+                state = State.Scanning;
+                currentTarget = null;
+            }
             return;
         }
 
@@ -987,24 +990,30 @@ public class SignReplacer extends Module {
     }
 
     private void waitForPlace() {
-        // Check if sign edit screen opens
-        if (mc.currentScreen instanceof SignEditScreen) {
-            state = State.Editing;
-            tickTimer = 0;
+        BlockPos posToUpdate = placePos != null ? placePos : currentTarget;
+
+        // Sign block appeared: send text packet immediately (2b2t often doesn't open sign screen)
+        if (posToUpdate != null && isSign(mc.world.getBlockState(posToUpdate))) {
+            if (tickTimer >= 1) {
+                sendSignTextPacket(posToUpdate);
+                if (mc.currentScreen instanceof SignEditScreen) {
+                    mc.currentScreen.close();
+                }
+                finishAfterPlace(posToUpdate);
+                return;
+            }
+        }
+
+        // If sign edit screen opened, send text and finish
+        if (mc.currentScreen instanceof SignEditScreen && posToUpdate != null) {
+            sendSignTextPacket(posToUpdate);
+            mc.currentScreen.close();
+            finishAfterPlace(posToUpdate);
             return;
         }
 
-        // Check if sign was placed
-        if (placePos != null && isSign(mc.world.getBlockState(placePos))) {
-            state = State.Editing;
-            tickTimer = 0;
-            return;
-        }
-
-        // Timeout
-        if (tickTimer > 20) {
-            BlockPos justPlaced = placePos != null ? placePos : currentTarget;
-            if (justPlaced != null) recentlyPlaced.put(posKey(justPlaced), System.currentTimeMillis());
+        if (tickTimer > 40) {
+            if (posToUpdate != null) recentlyPlaced.put(posKey(posToUpdate), System.currentTimeMillis());
             if (placePos != null) signs.remove(placePos);
             if (currentTarget != null) signs.remove(currentTarget);
             state = State.Scanning;
@@ -1013,30 +1022,22 @@ public class SignReplacer extends Module {
         }
     }
 
-    private void editSign() {
-        if (tickTimer < 1) return;
-
-        // If sign edit screen is open, send the text
-        if (mc.currentScreen instanceof SignEditScreen) {
-            // Send sign update packet
-            if (placePos != null || currentTarget != null) {
-                BlockPos pos = placePos != null ? placePos : currentTarget;
-
-                mc.player.networkHandler.sendPacket(new UpdateSignC2SPacket(
-                    pos,
-                    true, // front
-                    line1.get(),
-                    line2.get(),
-                    line3.get(),
-                    line4.get()
-                ));
-
-                mc.currentScreen.close();
-            }
+    private void sendSignTextPacket(BlockPos pos) {
+        try {
+            mc.player.networkHandler.sendPacket(new UpdateSignC2SPacket(
+                pos,
+                true,
+                line1.get(),
+                line2.get(),
+                line3.get(),
+                line4.get()
+            ));
+        } catch (Throwable t) {
+            info("Failed to set sign text: " + t.getMessage());
         }
+    }
 
-        // Move to next sign; mark this position so we don't re-mine it for 20 sec
-        BlockPos justPlaced = placePos != null ? placePos : currentTarget;
+    private void finishAfterPlace(BlockPos justPlaced) {
         if (justPlaced != null) recentlyPlaced.put(posKey(justPlaced), System.currentTimeMillis());
         placementCooldownTicks = placementCooldown.get();
         state = State.Scanning;
