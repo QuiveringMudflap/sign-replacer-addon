@@ -255,6 +255,12 @@ public class SignReplacer extends Module {
     private int scanMaxZ;
     private int placementCooldownTicks = 0;
     private int jumpReleaseTicks = 0;
+    /** Consecutive ticks we've had a sign in inventory (avoid leaving drop phase before pickup is synced). */
+    private int ticksWithSign = 0;
+    /** Retries of "go back to drop" when we reach Placing without a sign (2b2t lag). */
+    private int placeRetryCount = 0;
+    private static final int TICKS_REQUIRED_WITH_SIGN = 10;
+    private static final int MAX_PLACE_RETRIES = 3;
     private static final int MAX_RENDER_BOXES = 64;
     /** Skip these positions when scanning for 20 sec so we don't re-mine signs we just placed. */
     private final Map<String, Long> recentlyPlaced = new HashMap<>();
@@ -292,6 +298,8 @@ public class SignReplacer extends Module {
         scanCurrentY = Integer.MIN_VALUE;
         placementCooldownTicks = 0;
         jumpReleaseTicks = 0;
+        ticksWithSign = 0;
+        placeRetryCount = 0;
     }
 
     @Override
@@ -551,14 +559,31 @@ public class SignReplacer extends Module {
         }
         collectingTicks++;
         ItemEntity dropEntity = findDroppedSignEntity(placePos);
+        boolean haveSign = findSign().found();
+
         if (dropEntity == null || !dropEntity.isAlive()) {
-            if (collectingTicks > 40) {
+            if (haveSign) {
+                BaritoneHelper.cancelPath();
+                collectingTicks = 0;
+                ticksWithSign = TICKS_REQUIRED_WITH_SIGN;
+                if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
+                    state = State.Placing;
+                    tickTimer = 0;
+                    placeRetryCount = 0;
+                } else {
+                    BaritoneHelper.pathTo(placePos);
+                    state = State.PathingToPlace;
+                    ticksAtTarget = 0;
+                    placeRetryCount = 0;
+                }
+            } else if (collectingTicks > 80) {
                 BaritoneHelper.cancelPath();
                 if (currentTarget != null) signs.remove(currentTarget);
                 currentTarget = null;
                 placePos = null;
                 state = State.Scanning;
                 collectingTicks = 0;
+                ticksWithSign = 0;
             }
             return;
         }
@@ -571,16 +596,22 @@ public class SignReplacer extends Module {
             placePos = null;
             state = State.Scanning;
             collectingTicks = 0;
+            ticksWithSign = 0;
             return;
         }
         if (collectingTicks % 15 == 0) {
             BaritoneHelper.pathTo(dropVec);
         }
         boolean inRange = distance <= pickupRange.get();
-        boolean haveSign = findSign().found();
-        if (inRange && haveSign) {
+        if (haveSign) {
+            ticksWithSign++;
+        } else {
+            ticksWithSign = 0;
+        }
+        if (inRange && ticksWithSign >= TICKS_REQUIRED_WITH_SIGN) {
             BaritoneHelper.cancelPath();
             collectingTicks = 0;
+            placeRetryCount = 0;
             if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
                 state = State.Placing;
                 tickTimer = 0;
@@ -590,10 +621,18 @@ public class SignReplacer extends Module {
                 ticksAtTarget = 0;
             }
         }
-        if (collectingTicks > 200) {
+        if (collectingTicks > 400 && haveSign) {
             BaritoneHelper.cancelPath();
-            state = State.Placing;
-            tickTimer = 0;
+            if (BaritoneHelper.isAdjacentTo(placePos, mc.player.getBlockPos())) {
+                state = State.Placing;
+                tickTimer = 0;
+                placeRetryCount = 0;
+            } else {
+                BaritoneHelper.pathTo(placePos);
+                state = State.PathingToPlace;
+                ticksAtTarget = 0;
+                placeRetryCount = 0;
+            }
             collectingTicks = 0;
         }
     }
@@ -841,13 +880,20 @@ public class SignReplacer extends Module {
 
         if (tickTimer < delay.get() + PLACE_WAIT_TICKS) return;
 
-        // Find sign in inventory
         FindItemResult signItem = findSign();
         if (!signItem.found()) {
-            if (tickTimer > 60) {
-                info("No signs in inventory – waiting for pickup.");
-                state = State.Scanning;
-                currentTarget = null;
+            if (tickTimer > 80) {
+                placeRetryCount++;
+                if (placeRetryCount < MAX_PLACE_RETRIES && placePos != null) {
+                    ticksWithSign = 0;
+                    collectingTicks = 0;
+                    state = State.PathingToDrop;
+                    tickTimer = 0;
+                } else {
+                    state = State.Scanning;
+                    currentTarget = null;
+                    placePos = null;
+                }
             }
             return;
         }
@@ -1042,6 +1088,8 @@ public class SignReplacer extends Module {
     private void finishAfterPlace(BlockPos justPlaced) {
         if (justPlaced != null) recentlyPlaced.put(posKey(justPlaced), System.currentTimeMillis());
         placementCooldownTicks = placementCooldown.get();
+        placeRetryCount = 0;
+        ticksWithSign = 0;
         state = State.Scanning;
         currentTarget = null;
         placePos = null;
