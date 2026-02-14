@@ -598,8 +598,8 @@ public class SignReplacer extends Module {
             ticksWithSign = 0;
             return;
         }
-        if (collectingTicks % 15 == 0) {
-            BaritoneHelper.pathTo(dropVec);
+        if (collectingTicks == 1) {
+            BaritoneHelper.pathTo(BlockPos.ofFloored(dropVec));
         }
         boolean inRange = distance <= pickupRange.get();
         if (haveSign) {
@@ -717,7 +717,6 @@ public class SignReplacer extends Module {
             miningBlock = null;
             collectingTicks = 0;
             if (BaritoneHelper.isAvailable() && placePos != null) {
-                BaritoneHelper.pathTo(placePos);
                 state = State.PathingToDrop;
             } else {
                 if (!BaritoneHelper.isAvailable()) {
@@ -779,7 +778,6 @@ public class SignReplacer extends Module {
             tickTimer = 0;
             collectingTicks = 0;
             if (BaritoneHelper.isAvailable() && placePos != null) {
-                BaritoneHelper.pathTo(placePos);
                 state = State.PathingToDrop;
             } else {
                 if (!BaritoneHelper.isAvailable()) {
@@ -795,7 +793,6 @@ public class SignReplacer extends Module {
 
         if (tickTimer > 15) {
             if (BaritoneHelper.isAvailable() && placePos != null) {
-                BaritoneHelper.pathTo(placePos);
                 state = State.PathingToDrop;
             } else {
                 if (!BaritoneHelper.isAvailable()) {

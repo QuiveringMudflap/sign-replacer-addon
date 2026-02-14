@@ -32,9 +32,10 @@ public final class BaritoneHelper {
         return available;
     }
 
-    /** Start pathing to a block (get adjacent to it). */
+    /** Start pathing to a block (get adjacent to it). Cancels any current path first. */
     public static boolean pathTo(BlockPos pos) {
         if (!isAvailable() || customGoalProcess == null) return false;
+        cancelPath();
         try {
             Class<?> goalClass = Class.forName("baritone.api.pathing.goals.GoalGetToBlock");
             Object goal = goalClass.getConstructor(BlockPos.class).newInstance(pos);
