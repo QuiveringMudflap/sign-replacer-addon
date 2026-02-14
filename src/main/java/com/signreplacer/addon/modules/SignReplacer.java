@@ -262,7 +262,10 @@ public class SignReplacer extends Module {
     /** Send sign text this many times (2b2t often drops the packet). */
     private int signTextSendsLeft = 0;
     private BlockPos signTextTargetPos = null;
+    /** When user does #stop, we stop issuing any new Baritone goals until module is toggled off/on. */
+    private boolean baritoneStoppedByUser = false;
     private static final int TICKS_REQUIRED_WITH_SIGN = 10;
+    private static final int TICKS_BEFORE_DETECT_STOP = 20;
     private static final int MAX_PLACE_RETRIES = 3;
     private static final int MAX_RENDER_BOXES = 64;
     /** Skip these positions when scanning for 20 sec so we don't re-mine signs we just placed. */
@@ -305,11 +308,13 @@ public class SignReplacer extends Module {
         placeRetryCount = 0;
         signTextSendsLeft = 0;
         signTextTargetPos = null;
+        baritoneStoppedByUser = false;
     }
 
     @Override
     public void onDeactivate() {
         BaritoneHelper.cancelPath();
+        baritoneStoppedByUser = false;
         signs.clear();
         currentTarget = null;
         miningBlock = null;
@@ -333,6 +338,11 @@ public class SignReplacer extends Module {
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
+
+        if (baritoneStoppedByUser) {
+            BaritoneHelper.cancelPath();
+            return;
+        }
 
         if (state == State.Breaking) {
             jumpReleaseTicks = 0;
@@ -361,6 +371,7 @@ public class SignReplacer extends Module {
     }
 
     private void scanForSigns() {
+        if (baritoneStoppedByUser) return;
         if (placeOnly.get()) {
             if (placementCooldownTicks > 0) {
                 placementCooldownTicks--;
@@ -450,6 +461,7 @@ public class SignReplacer extends Module {
     }
 
     private void finishScanAndPickTarget() {
+        if (baritoneStoppedByUser) return;
         signs.sort(Comparator.comparingDouble(pos ->
             mc.player.getPos().squaredDistanceTo(Vec3d.ofCenter(pos))));
         if (signs.isEmpty()) return;
@@ -479,6 +491,16 @@ public class SignReplacer extends Module {
             return;
         }
         ticksAtTarget++;
+        if (ticksAtTarget > TICKS_BEFORE_DETECT_STOP && !BaritoneHelper.isPathing()) {
+            baritoneStoppedByUser = true;
+            BaritoneHelper.cancelPath();
+            currentTarget = null;
+            placePos = null;
+            state = State.Scanning;
+            ticksAtTarget = 0;
+            info("Baritone stopped (#stop). Sign Replacer paused – toggle module off/on to resume.");
+            return;
+        }
         if (ticksAtTarget > giveUpTicks.get()) {
             BaritoneHelper.cancelPath();
             signs.remove(currentTarget);
@@ -543,6 +565,15 @@ public class SignReplacer extends Module {
             return;
         }
         ticksAtTarget++;
+        if (ticksAtTarget > TICKS_BEFORE_DETECT_STOP && !BaritoneHelper.isPathing()) {
+            baritoneStoppedByUser = true;
+            BaritoneHelper.cancelPath();
+            placePos = null;
+            state = State.Scanning;
+            ticksAtTarget = 0;
+            info("Baritone stopped (#stop). Sign Replacer paused – toggle module off/on to resume.");
+            return;
+        }
         if (ticksAtTarget > giveUpTicks.get()) {
             BaritoneHelper.cancelPath();
             placePos = null;
@@ -563,6 +594,16 @@ public class SignReplacer extends Module {
             return;
         }
         collectingTicks++;
+        if (collectingTicks > TICKS_BEFORE_DETECT_STOP && !BaritoneHelper.isPathing()) {
+            baritoneStoppedByUser = true;
+            BaritoneHelper.cancelPath();
+            currentTarget = null;
+            placePos = null;
+            state = State.Scanning;
+            collectingTicks = 0;
+            info("Baritone stopped (#stop). Sign Replacer paused – toggle module off/on to resume.");
+            return;
+        }
         ItemEntity dropEntity = findDroppedSignEntity(placePos);
         boolean haveSign = findSign().found();
 
