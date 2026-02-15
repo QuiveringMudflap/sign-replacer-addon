@@ -580,13 +580,18 @@ public class SignReplacer extends Module {
         }
         collectingTicks++;
         ItemEntity dropEntity = findDroppedSignEntity(placePos);
-        boolean haveSign = findSign().found();
+        FindItemResult signResult = findSign();
+        boolean haveSign = signResult.found();
+        // When replacing a broken sign, only treat as "have sign" if we have THAT type (avoids placing oak before birch drop appears on 2b2t lag).
+        boolean haveRightSign = preferredSignItem == null
+            ? haveSign
+            : InvUtils.find(stack -> stack.getItem() == preferredSignItem).found();
 
         if (dropEntity == null || !dropEntity.isAlive()) {
             if (collectingTicks == 1) {
                 BaritoneHelper.pathTo(placePos);
             }
-            if (haveSign) {
+            if (haveRightSign) {
                 BaritoneHelper.cancelPath();
                 collectingTicks = 0;
                 ticksWithSign = TICKS_REQUIRED_WITH_SIGN;
@@ -621,7 +626,7 @@ public class SignReplacer extends Module {
             BaritoneHelper.pathTo(BlockPos.ofFloored(dropVec));
         }
         boolean inRange = distance <= pickupRange.get();
-        if (haveSign) {
+        if (haveRightSign) {
             ticksWithSign++;
         } else {
             ticksWithSign = 0;
@@ -633,7 +638,7 @@ public class SignReplacer extends Module {
             state = State.Placing;
             tickTimer = 0;
         }
-        if (collectingTicks > 400 && haveSign) {
+        if (collectingTicks > 400 && haveRightSign) {
             BaritoneHelper.cancelPath();
             state = State.Placing;
             tickTimer = 0;
