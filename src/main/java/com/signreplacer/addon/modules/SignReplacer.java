@@ -20,6 +20,7 @@ import net.minecraft.client.gui.screen.ingame.SignEditScreen;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
@@ -240,6 +241,8 @@ public class SignReplacer extends Module {
     private State state = State.Scanning;
     private BlockPos placePos = null;
     private Direction placeDirection = null;
+    /** When replacing a broken sign, we place back the same wood type (e.g. birch → birch). */
+    private Item preferredSignItem = null;
     private float miningProgress = 0;
     private BlockPos miningBlock = null;
     // Chunked scan for large range: max blocks per tick (higher = faster scan, small stutter)
@@ -262,11 +265,10 @@ public class SignReplacer extends Module {
     /** Send sign text this many times (2b2t often drops the packet). */
     private int signTextSendsLeft = 0;
     private BlockPos signTextTargetPos = null;
-    /** When user does #stop, we stop issuing any new Baritone goals until module is toggled off/on. */
-    private boolean baritoneStoppedByUser = false;
-    private static final int TICKS_REQUIRED_WITH_SIGN = 10;
-    private static final int TICKS_BEFORE_DETECT_STOP = 20;
+    private static final int TICKS_REQUIRED_WITH_SIGN = 2;
     private static final int MAX_PLACE_RETRIES = 3;
+    /** Always scan this radius first so we pick nearest signs; only use full range if none nearby. */
+    private static final int NEAR_SCAN_RADIUS = 24;
     private static final int MAX_RENDER_BOXES = 64;
     /** Skip these positions when scanning for 20 sec so we don't re-mine signs we just placed. */
     private final Map<String, Long> recentlyPlaced = new HashMap<>();
@@ -298,6 +300,7 @@ public class SignReplacer extends Module {
         state = State.Scanning;
         placePos = null;
         placeDirection = null;
+        preferredSignItem = null;
         miningProgress = 0;
         miningBlock = null;
         collectingTicks = 0;
@@ -308,13 +311,11 @@ public class SignReplacer extends Module {
         placeRetryCount = 0;
         signTextSendsLeft = 0;
         signTextTargetPos = null;
-        baritoneStoppedByUser = false;
     }
 
     @Override
     public void onDeactivate() {
         BaritoneHelper.cancelPath();
-        baritoneStoppedByUser = false;
         signs.clear();
         currentTarget = null;
         miningBlock = null;
@@ -338,11 +339,6 @@ public class SignReplacer extends Module {
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
-
-        if (baritoneStoppedByUser) {
-            BaritoneHelper.cancelPath();
-            return;
-        }
 
         if (state == State.Breaking) {
             jumpReleaseTicks = 0;
@@ -371,7 +367,6 @@ public class SignReplacer extends Module {
     }
 
     private void scanForSigns() {
-        if (baritoneStoppedByUser) return;
         if (placeOnly.get()) {
             if (placementCooldownTicks > 0) {
                 placementCooldownTicks--;
@@ -382,11 +377,17 @@ public class SignReplacer extends Module {
             return;
         }
         int r = range.get();
-        if (r > 32) {
-            scanForSignsLayered();
+        int near = Math.min(NEAR_SCAN_RADIUS, r);
+        scanForSignsFull(near, false);
+        if (!signs.isEmpty()) {
+            finishScanAndPickTarget();
             return;
         }
-        scanForSignsFull(r);
+        if (r <= 32) {
+            scanForSignsFull(r, true);
+            return;
+        }
+        scanForSignsLayered();
     }
 
     /** Chunked scan when range > 32: at most MAX_BLOCKS_PER_TICK per tick so no lag spike. */
@@ -437,8 +438,8 @@ public class SignReplacer extends Module {
         }
     }
 
-    /** Original full 3D scan when range <= 32. */
-    private void scanForSignsFull(int r) {
+    /** Full 3D scan in a cube; if thenPickTarget, call finishScanAndPickTarget after. */
+    private void scanForSignsFull(int r, boolean thenPickTarget) {
         signs.clear();
         BlockPos playerPos = mc.player.getBlockPos();
         for (int x = -r; x <= r; x++) {
@@ -457,17 +458,20 @@ public class SignReplacer extends Module {
                 }
             }
         }
-        finishScanAndPickTarget();
+        if (thenPickTarget) finishScanAndPickTarget();
     }
 
     private void finishScanAndPickTarget() {
-        if (baritoneStoppedByUser) return;
         signs.sort(Comparator.comparingDouble(pos ->
             mc.player.getPos().squaredDistanceTo(Vec3d.ofCenter(pos))));
         if (signs.isEmpty()) return;
         currentTarget = signs.get(0);
         placePos = currentTarget;
-        placeDirection = getSignDirection(mc.world.getBlockState(currentTarget));
+        BlockState targetState = mc.world.getBlockState(currentTarget);
+        placeDirection = getSignDirection(targetState);
+        // Prefer placing back the same wood type (birch → birch, pale oak → pale oak).
+        Item blockItem = targetState.getBlock().asItem();
+        preferredSignItem = (blockItem != null && blockItem != Items.AIR && isSignItem(new ItemStack(blockItem))) ? blockItem : null;
         double distance = mc.player.getPos().distanceTo(Vec3d.ofCenter(currentTarget));
         if (distance > 4.5 && autoWalk.get()) {
             if (useBaritone.get() && BaritoneHelper.isAvailable()) {
@@ -491,16 +495,6 @@ public class SignReplacer extends Module {
             return;
         }
         ticksAtTarget++;
-        if (ticksAtTarget > TICKS_BEFORE_DETECT_STOP && !BaritoneHelper.isPathing()) {
-            baritoneStoppedByUser = true;
-            BaritoneHelper.cancelPath();
-            currentTarget = null;
-            placePos = null;
-            state = State.Scanning;
-            ticksAtTarget = 0;
-            info("Baritone stopped (#stop). Sign Replacer paused – toggle module off/on to resume.");
-            return;
-        }
         if (ticksAtTarget > giveUpTicks.get()) {
             BaritoneHelper.cancelPath();
             signs.remove(currentTarget);
@@ -565,15 +559,6 @@ public class SignReplacer extends Module {
             return;
         }
         ticksAtTarget++;
-        if (ticksAtTarget > TICKS_BEFORE_DETECT_STOP && !BaritoneHelper.isPathing()) {
-            baritoneStoppedByUser = true;
-            BaritoneHelper.cancelPath();
-            placePos = null;
-            state = State.Scanning;
-            ticksAtTarget = 0;
-            info("Baritone stopped (#stop). Sign Replacer paused – toggle module off/on to resume.");
-            return;
-        }
         if (ticksAtTarget > giveUpTicks.get()) {
             BaritoneHelper.cancelPath();
             placePos = null;
@@ -594,26 +579,18 @@ public class SignReplacer extends Module {
             return;
         }
         collectingTicks++;
-        if (collectingTicks > TICKS_BEFORE_DETECT_STOP && !BaritoneHelper.isPathing()) {
-            baritoneStoppedByUser = true;
-            BaritoneHelper.cancelPath();
-            currentTarget = null;
-            placePos = null;
-            state = State.Scanning;
-            collectingTicks = 0;
-            info("Baritone stopped (#stop). Sign Replacer paused – toggle module off/on to resume.");
-            return;
-        }
         ItemEntity dropEntity = findDroppedSignEntity(placePos);
         boolean haveSign = findSign().found();
 
         if (dropEntity == null || !dropEntity.isAlive()) {
+            if (collectingTicks == 1) {
+                BaritoneHelper.pathTo(placePos);
+            }
             if (haveSign) {
                 BaritoneHelper.cancelPath();
                 collectingTicks = 0;
                 ticksWithSign = TICKS_REQUIRED_WITH_SIGN;
                 state = State.Placing;
-                placePos = null;
                 tickTimer = 0;
                 placeRetryCount = 0;
             } else if (collectingTicks > 80) {
@@ -621,6 +598,7 @@ public class SignReplacer extends Module {
                 if (currentTarget != null) signs.remove(currentTarget);
                 currentTarget = null;
                 placePos = null;
+                preferredSignItem = null;
                 state = State.Scanning;
                 collectingTicks = 0;
                 ticksWithSign = 0;
@@ -653,13 +631,11 @@ public class SignReplacer extends Module {
             collectingTicks = 0;
             placeRetryCount = 0;
             state = State.Placing;
-            placePos = null;
             tickTimer = 0;
         }
         if (collectingTicks > 400 && haveSign) {
             BaritoneHelper.cancelPath();
             state = State.Placing;
-            placePos = null;
             tickTimer = 0;
             placeRetryCount = 0;
             collectingTicks = 0;
@@ -766,6 +742,7 @@ public class SignReplacer extends Module {
                 if (currentTarget != null) signs.remove(currentTarget);
                 currentTarget = null;
                 placePos = null;
+                preferredSignItem = null;
                 state = State.Scanning;
             }
             return;
@@ -818,22 +795,27 @@ public class SignReplacer extends Module {
         if (!isSign(mc.world.getBlockState(currentTarget))) {
             tickTimer = 0;
             collectingTicks = 0;
-            if (BaritoneHelper.isAvailable() && placePos != null) {
+            if (placePos == null) {
+                if (currentTarget != null) signs.remove(currentTarget);
+                currentTarget = null;
+                state = State.Scanning;
+                return;
+            }
+            if (BaritoneHelper.isAvailable()) {
                 state = State.PathingToDrop;
             } else {
-                if (!BaritoneHelper.isAvailable()) {
-                    info("Baritone required to pick up drops – add Baritone mod. Skipping sign.");
-                }
+                info("Baritone required to pick up drops – add Baritone mod. Skipping sign.");
                 if (currentTarget != null) signs.remove(currentTarget);
                 currentTarget = null;
                 placePos = null;
+                preferredSignItem = null;
                 state = State.Scanning;
             }
             return;
         }
 
         if (tickTimer > 15) {
-            if (BaritoneHelper.isAvailable() && placePos != null) {
+            if (placePos != null && BaritoneHelper.isAvailable()) {
                 state = State.PathingToDrop;
             } else {
                 if (!BaritoneHelper.isAvailable()) {
@@ -842,6 +824,7 @@ public class SignReplacer extends Module {
                 if (currentTarget != null) signs.remove(currentTarget);
                 currentTarget = null;
                 placePos = null;
+                preferredSignItem = null;
                 state = State.Scanning;
             }
             tickTimer = 0;
@@ -883,6 +866,7 @@ public class SignReplacer extends Module {
                 if (currentTarget != null) signs.remove(currentTarget);
                 currentTarget = null;
                 placePos = null;
+                preferredSignItem = null;
                 state = State.Scanning;
                 collectingTicks = 0;
                 mc.options.jumpKey.setPressed(false);
@@ -953,6 +937,7 @@ public class SignReplacer extends Module {
                     state = State.Scanning;
                     currentTarget = null;
                     placePos = null;
+                    preferredSignItem = null;
                 }
             }
             return;
@@ -978,6 +963,13 @@ public class SignReplacer extends Module {
             }
             signPos = placePos;
             placeSide = getPlaceSide(supportPos, placePos);
+            double distToPlace = mc.player.getPos().distanceTo(Vec3d.ofCenter(signPos));
+            if (distToPlace > 4.5 && useBaritone.get() && BaritoneHelper.isAvailable()) {
+                BaritoneHelper.pathTo(placePos);
+                state = State.PathingToPlace;
+                ticksAtTarget = 0;
+                return;
+            }
         } else {
             PlaceSpot spot = findPlaceSpotNearPlayer();
             if (spot == null) {
@@ -1046,20 +1038,27 @@ public class SignReplacer extends Module {
 
     private static boolean isSignItem(ItemStack stack) {
         if (stack == null || stack.isEmpty()) return false;
-        return stack.getItem() == Items.OAK_SIGN ||
-            stack.getItem() == Items.SPRUCE_SIGN ||
-            stack.getItem() == Items.BIRCH_SIGN ||
-            stack.getItem() == Items.JUNGLE_SIGN ||
-            stack.getItem() == Items.ACACIA_SIGN ||
-            stack.getItem() == Items.DARK_OAK_SIGN ||
-            stack.getItem() == Items.MANGROVE_SIGN ||
-            stack.getItem() == Items.CHERRY_SIGN ||
-            stack.getItem() == Items.BAMBOO_SIGN ||
-            stack.getItem() == Items.CRIMSON_SIGN ||
-            stack.getItem() == Items.WARPED_SIGN;
+        Item i = stack.getItem();
+        return i == Items.OAK_SIGN ||
+            i == Items.SPRUCE_SIGN ||
+            i == Items.BIRCH_SIGN ||
+            i == Items.JUNGLE_SIGN ||
+            i == Items.ACACIA_SIGN ||
+            i == Items.DARK_OAK_SIGN ||
+            i == Items.MANGROVE_SIGN ||
+            i == Items.CHERRY_SIGN ||
+            i == Items.BAMBOO_SIGN ||
+            i == Items.CRIMSON_SIGN ||
+            i == Items.WARPED_SIGN ||
+            i == Items.PALE_OAK_SIGN;
     }
 
+    /** Find a sign in inventory. When replacing a broken sign, prefers the same wood type so we place it back. */
     private FindItemResult findSign() {
+        if (preferredSignItem != null) {
+            FindItemResult sameType = InvUtils.find(stack -> stack.getItem() == preferredSignItem);
+            if (sameType.found()) return sameType;
+        }
         return InvUtils.find(itemStack ->
             itemStack.getItem() == Items.OAK_SIGN ||
             itemStack.getItem() == Items.SPRUCE_SIGN ||
@@ -1071,7 +1070,8 @@ public class SignReplacer extends Module {
             itemStack.getItem() == Items.CHERRY_SIGN ||
             itemStack.getItem() == Items.BAMBOO_SIGN ||
             itemStack.getItem() == Items.CRIMSON_SIGN ||
-            itemStack.getItem() == Items.WARPED_SIGN
+            itemStack.getItem() == Items.WARPED_SIGN ||
+            itemStack.getItem() == Items.PALE_OAK_SIGN
         );
     }
 
@@ -1168,6 +1168,7 @@ public class SignReplacer extends Module {
             state = State.Scanning;
             currentTarget = null;
             placePos = null;
+            preferredSignItem = null;
             signTextSendsLeft = 0;
             signTextTargetPos = null;
         }
@@ -1195,6 +1196,7 @@ public class SignReplacer extends Module {
         ticksWithSign = 0;
         signTextSendsLeft = 0;
         signTextTargetPos = null;
+        preferredSignItem = null;
         state = State.Scanning;
         currentTarget = null;
         placePos = null;

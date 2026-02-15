@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "package": "com.signreplacer.addon.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "TitleScreenMixin",
+    "SplashTextRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

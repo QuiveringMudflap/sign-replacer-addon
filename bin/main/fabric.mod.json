@@ -1,0 +1,30 @@
+{
+    "schemaVersion": 1,
+    "id": "sign-replacer-addon",
+    "version": "${version}",
+    "name": "Oxygen Mod",
+    "description": "A Meteor Client addon by QuiveringMudflap. Sign replacer and more utilities for 2b2t.",
+    "authors": ["QuiveringMudflap"],
+    "contact": {
+        "homepage": "https://github.com/QuiveringMudflap/sign-replacer-addon",
+        "sources": "https://github.com/QuiveringMudflap/sign-replacer-addon"
+    },
+    "license": "GPL-3.0",
+    "icon": "assets/sign-replacer-addon/icon.png",
+    "environment": "client",
+    "entrypoints": {
+        "meteor": [
+            "com.signreplacer.addon.SignReplacerAddon"
+        ]
+    },
+    "mixins": ["mudflap-mod.mixins.json"],
+    "depends": {
+        "minecraft": ">=1.21",
+        "fabricloader": ">=0.15.0",
+        "java": ">=21",
+        "meteor-client": "*"
+    },
+    "custom": {
+        "meteor-client:color": "255,170,0"
+    }
+}

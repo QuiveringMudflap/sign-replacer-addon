@@ -7,8 +7,8 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.Set;
@@ -17,8 +17,6 @@ import java.util.Set;
 public class SplashTextRendererMixin {
 
     @Shadow @Final private String text;
-
-    private static final int SPLASH_Y = 90;
 
     private static final String REPLACE_SPLASH_OLD = "MiniGame159 based god";
     private static final String REPLACE_SPLASH_NEW = "QuiveringMudflap based god";
@@ -33,6 +31,7 @@ public class SplashTextRendererMixin {
         "2b2t's finest",
         "Oxygen Mod loaded!",
         "QuiveringMudflap based god",
+        "THE VOID NEVER WAITS",
         "discord.gg/shop2b2t"
     );
 
@@ -49,28 +48,37 @@ public class SplashTextRendererMixin {
     }
 
     private static final int OXYGEN_YELLOW = 0xFFFF00; // gold/yellow for our splashes
+    private static final int OUTLINE_OFFSET = 1;
 
-    @Inject(method = "render", at = @At("HEAD"), cancellable = true)
-    private void onRender(DrawContext context, int screenWidth, TextRenderer textRenderer, int alpha, CallbackInfo ci) {
-        if (!OXYGEN_SPLASHES.contains(text)) return;
-        // Draw only our yellow version with outline; cancel vanilla so the black splash is never drawn
+    /**
+     * Redirect vanilla's single drawText call. Vanilla already computed x,y with correct
+     * position (bottom-right of logo) and wobble. We only replace the draw with our
+     * yellow + outline for Oxygen splashes; otherwise pass through.
+     */
+    @Redirect(
+        method = "render",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/client/gui/DrawContext;drawText(Lnet/minecraft/client/font/TextRenderer;Ljava/lang/String;IIIZ)V"
+        )
+    )
+    private void redirectSplashDraw(DrawContext context, TextRenderer textRenderer, String text, int x, int y, int color, boolean shadow) {
+        if (!OXYGEN_SPLASHES.contains(text)) {
+            context.drawText(textRenderer, text, x, y, color, shadow);
+            return;
+        }
+        // Use vanilla's x,y (has wobble + correct position). Draw outline then yellow.
+        int alpha = (color >> 24) & 0xFF;
         int outlineColor = (alpha << 24) | 0x000000;
         int fillColor = (alpha << 24) | (OXYGEN_YELLOW & 0x00FFFFFF);
-        int textWidth = textRenderer.getWidth(text);
-        int x = (screenWidth - textWidth) / 2;
-        int y = SPLASH_Y;
-        int o = 1;
-        // Outline
-        context.drawText(textRenderer, text, x - o, y, outlineColor, false);
-        context.drawText(textRenderer, text, x + o, y, outlineColor, false);
-        context.drawText(textRenderer, text, x, y - o, outlineColor, false);
-        context.drawText(textRenderer, text, x, y + o, outlineColor, false);
-        context.drawText(textRenderer, text, x - o, y - o, outlineColor, false);
-        context.drawText(textRenderer, text, x + o, y - o, outlineColor, false);
-        context.drawText(textRenderer, text, x - o, y + o, outlineColor, false);
-        context.drawText(textRenderer, text, x + o, y + o, outlineColor, false);
-        // Yellow center
+        context.drawText(textRenderer, text, x - OUTLINE_OFFSET, y, outlineColor, false);
+        context.drawText(textRenderer, text, x + OUTLINE_OFFSET, y, outlineColor, false);
+        context.drawText(textRenderer, text, x, y - OUTLINE_OFFSET, outlineColor, false);
+        context.drawText(textRenderer, text, x, y + OUTLINE_OFFSET, outlineColor, false);
+        context.drawText(textRenderer, text, x - OUTLINE_OFFSET, y - OUTLINE_OFFSET, outlineColor, false);
+        context.drawText(textRenderer, text, x + OUTLINE_OFFSET, y - OUTLINE_OFFSET, outlineColor, false);
+        context.drawText(textRenderer, text, x - OUTLINE_OFFSET, y + OUTLINE_OFFSET, outlineColor, false);
+        context.drawText(textRenderer, text, x + OUTLINE_OFFSET, y + OUTLINE_OFFSET, outlineColor, false);
         context.drawText(textRenderer, text, x, y, fillColor, false);
-        ci.cancel();
     }
 }

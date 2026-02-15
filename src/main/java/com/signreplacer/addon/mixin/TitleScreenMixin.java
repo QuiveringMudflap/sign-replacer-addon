@@ -21,9 +21,10 @@ public class TitleScreenMixin {
         "QuiveringMudflap was here",
         "2b2t's finest",
         "Oxygen Mod loaded!",
+        "QuiveringMudflap based god",
+        "THE VOID NEVER WAITS",
         "discord.gg/shop2b2t"
     };
-
     @Inject(method = "init", at = @At("TAIL"))
     private void onInit(CallbackInfo ci) {
         // 10% chance to show an Oxygen splash
