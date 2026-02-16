@@ -119,7 +119,7 @@ public class SignReplacer extends Module {
 
     private final Setting<Boolean> useBaritone = sgGeneral.add(new BoolSetting.Builder()
         .name("use-baritone")
-        .description("Use Baritone for pathfinding (install Baritone mod). Handles jumping, climbing, and looks like normal movement on 2b2t.")
+        .description("Use Baritone for movement, pathing, and mining (not vanilla/mineflayer). Install Baritone mod. Handles jumping, climbing, and breaking on 2b2t.")
         .defaultValue(true)
         .build()
     );
@@ -265,6 +265,10 @@ public class SignReplacer extends Module {
     /** Send sign text this many times (2b2t often drops the packet). */
     private int signTextSendsLeft = 0;
     private BlockPos signTextTargetPos = null;
+    /** After Baritone is cancelled (e.g. #stop), don't use Baritone again for this many ticks so it stays stopped. */
+    private int baritoneCancelCooldownTicks = 0;
+    /** When true, place sign wherever (findPlaceSpotNearPlayer) instead of exact placePos; used after picking up a dropped sign. */
+    private boolean preferPlaceWherever = false;
     private static final int TICKS_REQUIRED_WITH_SIGN = 2;
     private static final int MAX_PLACE_RETRIES = 3;
     /** Always scan this radius first so we pick nearest signs; only use full range if none nearby. */
@@ -281,6 +285,7 @@ public class SignReplacer extends Module {
         PathingToDrop,
         PathingToPlace,
         Breaking,
+        BaritoneMining,
         WaitingForBreak,
         CollectingItem,
         Placing,
@@ -293,6 +298,8 @@ public class SignReplacer extends Module {
 
     @Override
     public void onActivate() {
+        BaritoneHelper.cancelPath();
+        BaritoneHelper.cancelMining();
         signs.clear();
         currentTarget = null;
         tickTimer = 0;
@@ -311,11 +318,14 @@ public class SignReplacer extends Module {
         placeRetryCount = 0;
         signTextSendsLeft = 0;
         signTextTargetPos = null;
+        baritoneCancelCooldownTicks = 0;
+        preferPlaceWherever = false;
     }
 
     @Override
     public void onDeactivate() {
         BaritoneHelper.cancelPath();
+        BaritoneHelper.cancelMining();
         signs.clear();
         currentTarget = null;
         miningBlock = null;
@@ -340,7 +350,7 @@ public class SignReplacer extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
-        if (state == State.Breaking) {
+        if (state == State.Breaking || state == State.BaritoneMining) {
             jumpReleaseTicks = 0;
             mc.options.jumpKey.setPressed(false);
         } else if (jumpReleaseTicks > 0) {
@@ -351,6 +361,7 @@ public class SignReplacer extends Module {
         }
 
         tickTimer++;
+        if (baritoneCancelCooldownTicks > 0) baritoneCancelCooldownTicks--;
 
         switch (state) {
             case Scanning -> scanForSigns();
@@ -359,6 +370,7 @@ public class SignReplacer extends Module {
             case PathingToDrop -> tickPathingToDrop();
             case PathingToPlace -> tickPathingToPlace();
             case Breaking -> breakSign();
+            case BaritoneMining -> tickBaritoneMining();
             case WaitingForBreak -> waitForBreak();
             case CollectingItem -> tickCollectingItemBaritoneOnly();
             case Placing -> placeSign();
@@ -480,6 +492,7 @@ public class SignReplacer extends Module {
                 ticksAtTarget = 0;
             } else {
                 state = State.Walking;
+                ticksAtTarget = 0;
             }
         } else {
             state = State.Breaking;
@@ -494,6 +507,10 @@ public class SignReplacer extends Module {
             state = State.Scanning;
             return;
         }
+        if (useBaritone.get() && BaritoneHelper.isAvailable() && !BaritoneHelper.isPathing()) {
+            if (tickTimer % 20 == 1) BaritoneHelper.pathTo(currentTarget);
+            return;
+        }
         ticksAtTarget++;
         if (ticksAtTarget > giveUpTicks.get()) {
             BaritoneHelper.cancelPath();
@@ -505,9 +522,34 @@ public class SignReplacer extends Module {
         }
         if (BaritoneHelper.isAdjacentTo(currentTarget, mc.player.getBlockPos())) {
             BaritoneHelper.cancelPath();
-            state = State.Breaking;
             jumpReleaseTicks = 0;
             mc.options.jumpKey.setPressed(false);
+            tickTimer = 0;
+            BlockState targetState = mc.world.getBlockState(currentTarget);
+            if (useBaritone.get() && BaritoneHelper.isAvailable() && isSign(targetState)
+                && BaritoneHelper.mineBlock(targetState.getBlock())) {
+                state = State.BaritoneMining;
+            } else {
+                state = State.Breaking;
+            }
+        }
+    }
+
+    private void tickBaritoneMining() {
+        if (currentTarget == null) {
+            state = State.Scanning;
+            return;
+        }
+        if (!isSign(mc.world.getBlockState(currentTarget))) {
+            BaritoneHelper.cancelMining();
+            state = State.WaitingForBreak;
+            tickTimer = 0;
+            collectingTicks = 0;
+            return;
+        }
+        if (tickTimer > giveUpTicks.get()) {
+            BaritoneHelper.cancelMining();
+            state = State.Breaking;
             tickTimer = 0;
         }
     }
@@ -558,6 +600,10 @@ public class SignReplacer extends Module {
             state = State.Scanning;
             return;
         }
+        if (useBaritone.get() && BaritoneHelper.isAvailable() && !BaritoneHelper.isPathing()) {
+            if (tickTimer % 20 == 1) BaritoneHelper.pathTo(placePos);
+            return;
+        }
         ticksAtTarget++;
         if (ticksAtTarget > giveUpTicks.get()) {
             BaritoneHelper.cancelPath();
@@ -582,19 +628,27 @@ public class SignReplacer extends Module {
         ItemEntity dropEntity = findDroppedSignEntity(placePos);
         FindItemResult signResult = findSign();
         boolean haveSign = signResult.found();
-        // When replacing a broken sign, only treat as "have sign" if we have THAT type (avoids placing oak before birch drop appears on 2b2t lag).
         boolean haveRightSign = preferredSignItem == null
             ? haveSign
             : InvUtils.find(stack -> stack.getItem() == preferredSignItem).found();
 
+        if (useBaritone.get() && BaritoneHelper.isAvailable() && !BaritoneHelper.isPathing()) {
+            BlockPos pathTarget = (dropEntity != null && dropEntity.isAlive())
+                ? BlockPos.ofFloored(dropEntity.getPos())
+                : placePos;
+            if (tickTimer % 20 == 1) BaritoneHelper.pathTo(pathTarget);
+            return;
+        }
+
         if (dropEntity == null || !dropEntity.isAlive()) {
-            if (collectingTicks == 1) {
+            if (collectingTicks == 1 && useBaritone.get() && BaritoneHelper.isAvailable()) {
                 BaritoneHelper.pathTo(placePos);
             }
             if (haveRightSign) {
                 BaritoneHelper.cancelPath();
                 collectingTicks = 0;
                 ticksWithSign = TICKS_REQUIRED_WITH_SIGN;
+                preferPlaceWherever = true;
                 state = State.Placing;
                 tickTimer = 0;
                 placeRetryCount = 0;
@@ -610,36 +664,53 @@ public class SignReplacer extends Module {
             }
             return;
         }
+
         Vec3d dropVec = dropEntity.getPos();
         double distance = mc.player.getPos().distanceTo(dropVec);
+
         if (distance > maxDropDistance.get()) {
             BaritoneHelper.cancelPath();
             if (currentTarget != null) signs.remove(currentTarget);
             currentTarget = null;
             placePos = null;
+            preferredSignItem = null;
             state = State.Scanning;
             collectingTicks = 0;
             ticksWithSign = 0;
             return;
         }
-        if (collectingTicks == 1) {
+
+        if (collectingTicks > giveUpTicks.get() && distance > pickupRange.get()) {
+            BaritoneHelper.cancelPath();
+            if (currentTarget != null) signs.remove(currentTarget);
+            currentTarget = null;
+            placePos = null;
+            preferredSignItem = null;
+            state = State.Scanning;
+            collectingTicks = 0;
+            ticksWithSign = 0;
+            return;
+        }
+
+        if (collectingTicks == 1 && useBaritone.get() && BaritoneHelper.isAvailable()) {
             BaritoneHelper.pathTo(BlockPos.ofFloored(dropVec));
         }
+
         boolean inRange = distance <= pickupRange.get();
-        if (haveRightSign) {
-            ticksWithSign++;
-        } else {
-            ticksWithSign = 0;
-        }
+        if (haveRightSign) ticksWithSign++;
+        else ticksWithSign = 0;
+
         if (inRange && ticksWithSign >= TICKS_REQUIRED_WITH_SIGN) {
             BaritoneHelper.cancelPath();
             collectingTicks = 0;
             placeRetryCount = 0;
+            preferPlaceWherever = true;
             state = State.Placing;
             tickTimer = 0;
         }
         if (collectingTicks > 400 && haveRightSign) {
             BaritoneHelper.cancelPath();
+            preferPlaceWherever = true;
             state = State.Placing;
             tickTimer = 0;
             placeRetryCount = 0;
@@ -960,7 +1031,7 @@ public class SignReplacer extends Module {
         BlockPos supportPos;
         BlockPos signPos;
         Direction placeSide;
-        if (placePos != null) {
+        if (placePos != null && !preferPlaceWherever) {
             supportPos = findSupportBlock(placePos);
             if (supportPos == null) {
                 placePos = null;
@@ -976,6 +1047,7 @@ public class SignReplacer extends Module {
                 return;
             }
         } else {
+            preferPlaceWherever = false;
             PlaceSpot spot = findPlaceSpotNearPlayer();
             if (spot == null) {
                 mc.player.setYaw(mc.player.getYaw() + 25f);

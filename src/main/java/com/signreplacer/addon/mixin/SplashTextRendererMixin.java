@@ -7,20 +7,23 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
-import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.Set;
 
-@Mixin(SplashTextRenderer.class)
+/**
+ * Oxygen mod: custom yellow splash texts, replace Meteor splash with shop link.
+ * Uses @Inject at HEAD with require = 0 so mapping changes don't hard-crash the game.
+ */
+@Mixin(value = SplashTextRenderer.class, priority = 900)
 public class SplashTextRendererMixin {
 
     @Shadow @Final private String text;
 
     private static final String REPLACE_SPLASH_OLD = "MiniGame159 based god";
     private static final String REPLACE_SPLASH_NEW = "QuiveringMudflap based god";
-
     private static final String METEOR_REPLACEMENT = "discord.gg/shop2b2t";
 
     private static final Set<String> OXYGEN_SPLASHES = Set.of(
@@ -35,11 +38,16 @@ public class SplashTextRendererMixin {
         "discord.gg/shop2b2t"
     );
 
-    @ModifyVariable(method = "<init>", at = @At("HEAD"), argsOnly = true, ordinal = 0)
+    private static final int OXYGEN_YELLOW = 0xFFFF00;
+    /** Vanilla splash position (bottom-right of logo). Match SplashTextRenderer constants for 1.21.4. */
+    private static final int SPLASH_OFFSET_X = 76;
+    private static final int SPLASH_Y = 68;
+    private static final int OUTLINE_OFFSET = 1;
+
+    @ModifyVariable(method = "<init>", at = @At("HEAD"), argsOnly = true, ordinal = 0, require = 0)
     private static String replaceSplashName(String text) {
         if (text == null) return text;
         if (REPLACE_SPLASH_OLD.equals(text)) return REPLACE_SPLASH_NEW;
-        // Replace Meteor Client splash with shop link
         String lower = text.toLowerCase();
         if (lower.equals("meteorclient.com") || lower.equals("www.meteorclient.com")) {
             return METEOR_REPLACEMENT;
@@ -47,30 +55,20 @@ public class SplashTextRendererMixin {
         return text;
     }
 
-    private static final int OXYGEN_YELLOW = 0xFFFF00; // gold/yellow for our splashes
-    private static final int OUTLINE_OFFSET = 1;
-
     /**
-     * Redirect vanilla's single drawText call. Vanilla already computed x,y with correct
-     * position (bottom-right of logo) and wobble. We only replace the draw with our
-     * yellow + outline for Oxygen splashes; otherwise pass through.
+     * For our Oxygen splashes: draw yellow + outline at vanilla splash position and cancel vanilla.
+     * require = 0: if "render" signature changes in a future version, mixin is skipped instead of crashing.
      */
-    @Redirect(
-        method = "render",
-        at = @At(
-            value = "INVOKE",
-            target = "Lnet/minecraft/client/gui/DrawContext;drawText(Lnet/minecraft/client/font/TextRenderer;Ljava/lang/String;IIIZ)V"
-        )
-    )
-    private void redirectSplashDraw(DrawContext context, TextRenderer textRenderer, String text, int x, int y, int color, boolean shadow) {
-        if (!OXYGEN_SPLASHES.contains(text)) {
-            context.drawText(textRenderer, text, x, y, color, shadow);
-            return;
-        }
-        // Use vanilla's x,y (has wobble + correct position). Draw outline then yellow.
-        int alpha = (color >> 24) & 0xFF;
+    @Inject(method = "render", at = @At("HEAD"), cancellable = true, require = 0)
+    private void onRenderHead(DrawContext context, int screenWidth, TextRenderer textRenderer, int alpha, CallbackInfo ci) {
+        if (!OXYGEN_SPLASHES.contains(text)) return;
+
+        int textWidth = textRenderer.getWidth(text);
+        int x = (screenWidth - textWidth) / 2 + SPLASH_OFFSET_X;
+        int y = SPLASH_Y;
         int outlineColor = (alpha << 24) | 0x000000;
         int fillColor = (alpha << 24) | (OXYGEN_YELLOW & 0x00FFFFFF);
+
         context.drawText(textRenderer, text, x - OUTLINE_OFFSET, y, outlineColor, false);
         context.drawText(textRenderer, text, x + OUTLINE_OFFSET, y, outlineColor, false);
         context.drawText(textRenderer, text, x, y - OUTLINE_OFFSET, outlineColor, false);
@@ -80,5 +78,7 @@ public class SplashTextRendererMixin {
         context.drawText(textRenderer, text, x - OUTLINE_OFFSET, y + OUTLINE_OFFSET, outlineColor, false);
         context.drawText(textRenderer, text, x + OUTLINE_OFFSET, y + OUTLINE_OFFSET, outlineColor, false);
         context.drawText(textRenderer, text, x, y, fillColor, false);
+
+        ci.cancel();
     }
 }
