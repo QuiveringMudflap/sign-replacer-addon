@@ -1,0 +1,19 @@
+---
+description: Sign-replacer addon: always build, deploy JAR, and push repo; bump version on full updates
+alwaysApply: true
+---
+
+# Build and repo (sign-replacer-addon)
+
+After **any** code change to this project:
+
+1. Run `./gradlew build` (or `./gradlew pushRepo` which depends on build).
+2. Push to the repo: `./gradlew pushRepo` (builds, deploys JAR to Prism Launcher mods, then git add / commit / push).
+
+When making a **full or notable update** (new features, bigger behavior changes, not tiny tweaks):
+
+1. Bump **mod_version** in `gradle.properties` (e.g. `1.1.0` → `1.2.0`).
+2. Then run build and push as above.
+3. Say in the reply that you bumped to a new version.
+
+Version is in `gradle.properties`: `mod_version=...`.

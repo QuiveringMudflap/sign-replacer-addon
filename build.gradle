@@ -65,6 +65,9 @@ def modsDir = project.hasProperty('modsDir')
 
 tasks.register('deployToMods', Copy) {
     dependsOn copyWithVersion
+    doFirst {
+        file(modsDir).listFiles()?.findAll { it.name.startsWith(archives_base_name) && it.name.endsWith('.jar') }?.each { it.delete() }
+    }
     from("build/libs/${project.archives_base_name}-${project.mod_version}-mc${project.minecraft_version}.jar")
     into(modsDir)
     doLast { logger.lifecycle("Deployed JAR to ${modsDir}") }
@@ -73,6 +76,11 @@ tasks.register('deployToMods', Copy) {
 tasks.named('build') {
     finalizedBy copyWithVersion
     finalizedBy deployToMods
+}
+
+tasks.register('randomIcon', Exec) {
+    commandLine 'sh', project.file('scripts/random-icon.sh').absolutePath
+    onlyIf { project.file('scripts/random-icon.sh').exists() }
 }
 
 // Optional: push to git after building. Uses anonymous author so your real name isn't on the repo.
